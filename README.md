@@ -274,6 +274,14 @@ codex mcp add dev.mcp -- node /path/to/clone/dist/index.js
 
 Set env vars in the Codex profile or on the command, depending on the CLI.
 
+## Companion harness
+
+This server exposes tools. It does not impose gates, evidence, or a development cycle.
+
+[dev.harness](https://github.com/iwilldotdev/dev.harness) is the companion workflow: two flows — Feature (spec-driven) and Bug (reproduce / root-cause-first) — plus the review skills `dev-qa-guided-review` and `dev-mr-guided-review`. Those skills consume **this** server, not the official Figma, Atlassian, or GitLab MCP servers.
+
+Figma REST quota and `dev.mcp` bind are documented above. The harness does not replace this `mcp.json` (or equivalent host) configuration.
+
 ## Development
 
 ```bash
@@ -293,3 +301,7 @@ Rules so other clients keep working:
 - No Cursor-specific APIs, headers, or prompts
 - No dynamic OAuth (env vars) — works in headless harnesses (CI, Claude Code, Codex)
 - No dashboard, persisted auth, database, or second HTTP process
+
+## License
+
+[MIT](LICENSE)
