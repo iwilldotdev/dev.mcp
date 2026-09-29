@@ -73,7 +73,7 @@ export async function buildDesignContext(
     maxBytes: DESIGN_CONTEXT_BYTE_LIMIT,
   };
   const includeScreenshot = request.includeScreenshot !== false;
-  const includeVariables = request.includeVariables !== false;
+  const includeVariables = request.includeVariables === true;
   const nodeIds = request.nodeIds?.length ? request.nodeIds : undefined;
 
   let rawNodes: FigmaNode[] = [];

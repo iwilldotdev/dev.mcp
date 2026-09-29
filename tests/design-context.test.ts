@@ -38,6 +38,27 @@ function source(partial: Partial<DesignContextSource> = {}): DesignContextSource
 }
 
 describe("buildDesignContext", () => {
+  it("does not request variables unless asked", async () => {
+    let called = false;
+    const api = source({
+      async getNodes() {
+        return { name: "File", nodes: { "1:1": { document: frame("1:1") } } };
+      },
+      async getLocalVariables() {
+        called = true;
+        return {};
+      },
+    });
+    const payload = await buildDesignContext(api, {
+      fileKey: "abc",
+      nodeIds: ["1:1"],
+      includeScreenshot: false,
+    });
+    expect(called).toBe(false);
+    expect(payload.variables).toBeUndefined();
+    expect(payload.warnings).toEqual([]);
+  });
+
   it("keeps nodes when variables fail and reports the warning", async () => {
     const api = source({
       async getNodes() {
@@ -53,6 +74,7 @@ describe("buildDesignContext", () => {
     const payload = await buildDesignContext(api, {
       fileKey: "abc",
       nodeIds: ["1:1"],
+      includeVariables: true,
       includeMetadataXml: false,
     });
     expect(payload.nodes).toHaveLength(1);
@@ -72,7 +94,11 @@ describe("buildDesignContext", () => {
         throw new Error("render failed");
       },
     });
-    const payload = await buildDesignContext(api, { fileKey: "abc", nodeIds: ["1:1"] });
+    const payload = await buildDesignContext(api, {
+      fileKey: "abc",
+      nodeIds: ["1:1"],
+      includeVariables: true,
+    });
     expect(payload.nodes[0]?.id).toBe("1:1");
     expect(payload.variables).toBeDefined();
     expect(payload.screenshots).toBeUndefined();

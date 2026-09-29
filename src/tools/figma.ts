@@ -136,7 +136,7 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
 
   server.tool(
     "figma_get_design_context",
-    "Implementation context (layout, fixed sizing, effects, text, hidden layers, masks, component variants, style names, tokens, screenshot URL) composed via REST. A node id returns its subtree until depth or the node/byte cap cuts it; a cut sets truncated and truncation.hint. A call without a node id is cut at file depth 3. Missing ids are listed in missingNodeIds. A variables or screenshot failure is a warning and does not drop nodes. Rotation is passed through as REST returns it (unit not documented). Not the official MCP proprietary codegen.",
+    "Implementation context (layout, fixed sizing, effects, text, hidden layers, masks, component variants, style names, screenshot URL) composed via REST. Variables are off unless includeVariables is true; a variables failure is a warning and does not drop nodes or truncate the tree. A node id returns its subtree until depth or the node/byte cap cuts it; a cut sets truncated and truncation.hint. A call without a node id is cut at file depth 3. Missing ids are listed in missingNodeIds. A screenshot failure is a warning and does not drop nodes. Rotation is passed through as REST returns it (unit not documented). Not the official MCP proprietary codegen.",
     {
       ...fileKeyShape,
       nodeIds: z
@@ -151,7 +151,7 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
         .optional()
         .describe("Levels of children below each node id. Default: full subtree."),
       includeScreenshot: z.boolean().optional().describe("Default: true."),
-      includeVariables: z.boolean().optional().describe("Default: true."),
+      includeVariables: z.boolean().optional().describe("Default: false. Optional; a 403 does not affect the rest of the context."),
       includeMetadataXml: z
         .boolean()
         .optional()
