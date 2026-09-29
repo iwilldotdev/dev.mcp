@@ -8,13 +8,25 @@ export type FigmaFileResponse = {
   lastModified?: string;
   version?: string;
   document?: unknown;
+  components?: Record<string, { key?: string; name?: string; componentSetId?: string }>;
+  componentSets?: Record<string, { key?: string; name?: string }>;
+  styles?: Record<string, { key?: string; name?: string; styleType?: string }>;
   [key: string]: unknown;
 };
 
 export type FigmaNodesResponse = {
   name?: string;
   lastModified?: string;
-  nodes: Record<string, { document?: unknown; err?: string } | null>;
+  nodes: Record<
+    string,
+    {
+      document?: unknown;
+      components?: Record<string, { key?: string; name?: string; componentSetId?: string }>;
+      componentSets?: Record<string, { key?: string; name?: string }>;
+      styles?: Record<string, { key?: string; name?: string; styleType?: string }>;
+      err?: string;
+    } | null
+  >;
   [key: string]: unknown;
 };
 

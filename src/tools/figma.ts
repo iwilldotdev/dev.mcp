@@ -2,13 +2,13 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { requireFigma } from "../config.js";
 import { FigmaClient } from "../clients/figma.js";
+import { buildDesignContext } from "../figma/design-context.js";
 import {
   nodeToXml,
   parseFigmaFileKey,
   parseFigmaNodeIds,
   parseFigmaUrl,
   summarizeVariables,
-  toDesignContextNode,
   type FigmaNode,
 } from "../figma/parse.js";
 import type { Runtime } from "../runtime.js";
@@ -136,57 +136,42 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
 
   server.tool(
     "figma_get_design_context",
-    "Implementation context (layout, tokens, components, screenshot URL) composed via REST. Not the official MCP proprietary codegen.",
+    "Implementation context (layout, fixed sizing, effects, text, hidden layers, masks, component variants, style names, tokens, screenshot URL) composed via REST. A node id returns its subtree until depth or the node/byte cap cuts it; a cut sets truncated and truncation.hint. A call without a node id is cut at file depth 3. Missing ids are listed in missingNodeIds. A variables or screenshot failure is a warning and does not drop nodes. Rotation is passed through as REST returns it (unit not documented). Not the official MCP proprietary codegen.",
     {
       ...fileKeyShape,
       nodeIds: z
         .union([z.string(), z.array(z.string())])
         .optional()
         .describe("Target nodes. Recommended for smaller payloads."),
+      depth: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .optional()
+        .describe("Levels of children below each node id. Default: full subtree."),
       includeScreenshot: z.boolean().optional().describe("Default: true."),
       includeVariables: z.boolean().optional().describe("Default: true."),
+      includeMetadataXml: z
+        .boolean()
+        .optional()
+        .describe("Default: false. The same tree as XML; figma_get_metadata returns it alone."),
     },
     wrapTool(async (args) => {
-      const figma = client(runtime);
       const parsed = args.url ? parseFigmaUrl(args.url) : { fileKey: fileKeyFrom(args) };
       const fileKey = args.fileKey ? parseFigmaFileKey(args.fileKey) : parsed.fileKey;
       const nodeIds = parseFigmaNodeIds(args.nodeIds) ?? parsed.nodeIds;
-      const includeScreenshot = args.includeScreenshot !== false;
-      const includeVariables = args.includeVariables !== false;
-
-      let nodes: FigmaNode[] = [];
-      let fileName: string | undefined;
-      if (nodeIds?.length) {
-        const payload = await figma.getNodes(fileKey, nodeIds, { depth: 6 });
-        fileName = payload.name;
-        nodes = Object.values(payload.nodes)
-          .map((entry) => entry?.document as FigmaNode | undefined)
-          .filter((node): node is FigmaNode => Boolean(node));
-      } else {
-        const file = await figma.getFile(fileKey, { depth: 3 });
-        fileName = file.name;
-        nodes = file.document ? [file.document as FigmaNode] : [];
-      }
-
-      const screenshotIds = nodeIds?.length ? nodeIds : nodes.slice(0, 1).map((n) => n.id);
-      const [variables, screenshot] = await Promise.all([
-        includeVariables
-          ? figma.getLocalVariables(fileKey).then(summarizeVariables)
-          : Promise.resolve(undefined),
-        includeScreenshot && screenshotIds.length
-          ? figma.getImages(fileKey, screenshotIds, { format: "png", scale: 2 })
-          : Promise.resolve(undefined),
-      ]);
-
-      return {
-        fileKey,
-        name: fileName,
-        note: "Context derived from the REST API; does not include Figma MCP proprietary codegen.",
-        metadataXml: nodes.map((node) => nodeToXml(node)).join("\n"),
-        nodes: nodes.map((node) => toDesignContextNode(node)),
-        variables,
-        screenshots: screenshot?.images,
-      };
+      // Compact on purpose: a full screen subtree is large, and wrapTool leaves a string as-is.
+      return JSON.stringify(
+        await buildDesignContext(client(runtime), {
+          fileKey,
+          nodeIds,
+          depth: args.depth,
+          includeScreenshot: args.includeScreenshot,
+          includeVariables: args.includeVariables,
+          includeMetadataXml: args.includeMetadataXml,
+        }),
+      );
     }),
   );
 

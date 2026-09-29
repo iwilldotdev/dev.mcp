@@ -85,7 +85,7 @@ Stable prefixes: `figma_*`, `jira_*`, `confluence_*`, `gitlab_*`.
 | `figma_get_metadata`       | `GET /v1/files/:key/nodes` → slim XML (id, name, type, size)                                              |
 | `figma_get_screenshot`     | `GET /v1/images/:key`                                                                                     |
 | `figma_get_variable_defs`  | `GET /v1/files/:key/variables/local` (+ published optional)                                               |
-| `figma_get_design_context` | orchestrates nodes + variables + screenshot URL (implementation context, not official proprietary codegen) |
+| `figma_get_design_context` | orchestrates nodes (layout, `visual`, text, hidden layers, `maskType`, component variants, style names) + variables + screenshot URL; a node id returns its subtree until `depth` or the node/byte cap, any cut sets `truncated` and `truncation.hint`, missing ids are listed, and a variables or screenshot failure is a warning that keeps the nodes (implementation context, not official proprietary codegen) |
 | `figma_download_assets`    | `GET /v1/images` + image fills                                                                            |
 | `figma_get_comments`       | `GET /v1/files/:key/comments`                                                                             |
 
