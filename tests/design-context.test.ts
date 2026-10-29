@@ -293,4 +293,111 @@ describe("buildDesignContext", () => {
     expect(payload.truncation?.reasons).toContain("file-depth");
     expect(payload.nodes[0]?.id).toBe("0:1");
   });
+
+  it("passes lastModified through for pack freshness checks", async () => {
+    const api = source({
+      async getNodes() {
+        return {
+          name: "File",
+          lastModified: "2026-10-28T12:00:00Z",
+          nodes: { "1:1": { document: frame("1:1") } },
+        };
+      },
+    });
+    const payload = await buildDesignContext(api, {
+      fileKey: "abc",
+      nodeIds: ["1:1"],
+      includeScreenshot: false,
+      includeVariables: false,
+    });
+    expect(payload.lastModified).toBe("2026-10-28T12:00:00Z");
+  });
+
+  it("emits only the requested blocks when fields is set", async () => {
+    const node: FigmaNode = {
+      id: "1:1",
+      name: "Row",
+      type: "FRAME",
+      layoutMode: "HORIZONTAL",
+      itemSpacing: 8,
+      fills: [{ type: "SOLID" }],
+      strokes: [{ type: "SOLID" }],
+      characters: "Hello",
+      style: { fontFamily: "Inter", fontSize: 14 },
+      componentId: "10:1",
+      styles: { text: "S:1" },
+      children: [frame("1:2")],
+    };
+    const api = source({
+      async getNodes() {
+        return { name: "File", nodes: { "1:1": { document: node } } };
+      },
+    });
+    const payload = await buildDesignContext(api, {
+      fileKey: "abc",
+      nodeIds: ["1:1"],
+      includeScreenshot: false,
+      includeVariables: false,
+      fields: ["text", "layout"],
+    });
+    const out = payload.nodes[0] as Record<string, unknown>;
+    expect(out.layout).toBeDefined();
+    expect(out.text).toBeDefined();
+    expect(out.fills).toBeUndefined();
+    expect(out.strokes).toBeUndefined();
+    expect(out.visual).toBeUndefined();
+    expect(out.componentId).toBeUndefined();
+    expect(out.children).toBeDefined();
+  });
+
+  it("exposes hyperlink and prototype reactions for pointer resolution", async () => {
+    const node: FigmaNode & { reactions: unknown[] } = {
+      id: "1:1",
+      name: "Spec",
+      type: "FRAME",
+      hyperlink: { nodeId: "203:13054" },
+      reactions: [
+        { action: { type: "NODE", destination: { destinationNodeId: "203:13054" } } },
+      ],
+    };
+    const api = source({
+      async getNodes() {
+        return { name: "File", nodes: { "1:1": { document: node } } };
+      },
+    });
+    const payload = await buildDesignContext(api, {
+      fileKey: "abc",
+      nodeIds: ["1:1"],
+      includeScreenshot: false,
+      includeVariables: false,
+    });
+    expect(payload.nodes[0]?.hyperlink).toEqual({ nodeId: "203:13054" });
+    expect(payload.nodes[0]?.reactions?.[0]).toMatchObject({
+      action: { destination: { destinationNodeId: "203:13054" } },
+    });
+  });
+
+  it("lists the cut nodes as nextChildIds", async () => {
+    const root = frame(
+      "1:1",
+      Array.from({ length: 6 }, (_, index) => frame(`1:${index + 2}`)),
+    );
+    const api = source({
+      async getNodes() {
+        return { name: "File", nodes: { "1:1": { document: root } } };
+      },
+    });
+    const payload = await buildDesignContext(api, {
+      fileKey: "abc",
+      nodeIds: ["1:1"],
+      includeScreenshot: false,
+      includeVariables: false,
+      limits: { maxNodes: 3, maxBytes: 750_000 },
+    });
+    expect(payload.truncated).toBe(true);
+    expect(payload.truncation?.nextChildIds).toContain("1:1");
+    for (const cut of payload.truncation?.nextChildIds ?? []) {
+      expect(cut).toMatch(/^\d+:\d+$/);
+    }
+  });
 });

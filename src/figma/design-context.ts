@@ -19,6 +19,8 @@ import {
 
 export const DESIGN_CONTEXT_TRUNCATION_HINT =
   "Pass depth or a child node id to fetch the next level.";
+/** Cap on the actionable list of node ids whose children were cut. */
+const NEXT_CHILD_IDS_LIMIT = 50;
 
 export type DesignContextSource = {
   getNodes(
@@ -42,6 +44,8 @@ export type DesignContextRequest = {
   includeScreenshot?: boolean;
   includeVariables?: boolean;
   includeMetadataXml?: boolean;
+  /** Emit only these blocks per node (`layout`, `visual`, `fills`, `strokes`, `text`, `component`). */
+  fields?: string[];
   /** Defaults to the design-context node and byte caps. */
   limits?: { maxNodes: number; maxBytes: number };
 };
@@ -49,9 +53,16 @@ export type DesignContextRequest = {
 export type DesignContextPayload = {
   fileKey: string;
   name?: string;
+  /** REST file revision at fetch time; a pack consumer compares it to detect staleness. */
+  lastModified?: string;
   note: string;
   truncated: boolean;
-  truncation?: { reasons: string[]; hint: string };
+  truncation?: {
+    reasons: string[];
+    hint: string;
+    /** Node ids whose children were cut; refetch these ids to continue. */
+    nextChildIds?: string[];
+  };
   metadataXml?: string;
   nodes: DesignContextNode[];
   variables?: unknown;
@@ -78,6 +89,7 @@ export async function buildDesignContext(
 
   let rawNodes: FigmaNode[] = [];
   let fileName: string | undefined;
+  let lastModified: string | undefined;
   const refs: Required<DesignContextRefs> = { components: {}, componentSets: {}, styles: {} };
   const missingNodeIds: string[] = [];
   const nodeErrors: Record<string, string> = {};
@@ -89,6 +101,7 @@ export async function buildDesignContext(
       request.depth ? { depth: request.depth + 1 } : {},
     );
     fileName = payload.name;
+    lastModified = payload.lastModified;
     for (const id of nodeIds) {
       const entry = lookupNode(payload.nodes, id);
       if (!entry || entry.err || !entry.document) {
@@ -102,6 +115,7 @@ export async function buildDesignContext(
   } else {
     const file = await source.getFile(request.fileKey, { depth: 3 });
     fileName = file.name;
+    lastModified = file.lastModified;
     assignRefs(refs, file);
     rawNodes = file.document ? [file.document as FigmaNode] : [];
   }
@@ -111,6 +125,7 @@ export async function buildDesignContext(
     maxNodes: limits.maxNodes,
     maxBytes: limits.maxBytes,
     refs,
+    fields: request.fields,
   });
   const reasons: string[] = [];
   if (!nodeIds) reasons.push("file-depth");
@@ -143,6 +158,7 @@ export async function buildDesignContext(
   const payload: DesignContextPayload = {
     fileKey: request.fileKey,
     name: fileName,
+    lastModified,
     note: NOTE,
     truncated: reasons.length > 0,
     metadataXml: request.includeMetadataXml
@@ -158,9 +174,28 @@ export async function buildDesignContext(
   fitPayload(payload, reasons, limits.maxBytes);
   payload.truncated = reasons.length > 0;
   if (payload.truncated) {
-    payload.truncation = { reasons, hint: DESIGN_CONTEXT_TRUNCATION_HINT };
+    const nextChildIds = collectCutNodeIds(payload.nodes);
+    payload.truncation = {
+      reasons,
+      hint: DESIGN_CONTEXT_TRUNCATION_HINT,
+      ...(nextChildIds.length ? { nextChildIds } : {}),
+    };
   }
   return payload;
+}
+
+function collectCutNodeIds(nodes: DesignContextNode[]): string[] {
+  const out: string[] = [];
+  const walk = (list: DesignContextNode[]): void => {
+    for (const node of list) {
+      if (!node.childrenTruncated) continue;
+      if (out.length >= NEXT_CHILD_IDS_LIMIT) return;
+      out.push(node.id);
+      walk(node.children ?? []);
+    }
+  };
+  walk(nodes);
+  return out;
 }
 
 function lookupNode(nodes: FigmaNodesResponse["nodes"], id: string) {

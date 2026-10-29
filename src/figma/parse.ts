@@ -114,6 +114,10 @@ export type FigmaNode = {
   componentId?: string;
   componentProperties?: Record<string, unknown>;
   styles?: Record<string, string>;
+  /** REST hyperlink: `{ url }` for external links or `{ nodeId }` for internal ones. */
+  hyperlink?: { url?: string; nodeId?: string };
+  /** REST prototype interactions; `destinationNodeId`/`destination` point at screen nodes. */
+  reactions?: unknown[];
   children?: FigmaNode[];
   [key: string]: unknown;
 };
@@ -131,12 +135,30 @@ export function nodeToXml(node: FigmaNode, indent = 0): string {
     attrs.push(`width="${round(node.absoluteBoundingBox.width)}"`);
     attrs.push(`height="${round(node.absoluteBoundingBox.height)}"`);
   }
+  if (node.hyperlink?.nodeId) attrs.push(`hyperlinkNode="${escapeXml(node.hyperlink.nodeId)}"`);
+  if (node.hyperlink?.url) attrs.push(`hyperlinkUrl="${escapeXml(node.hyperlink.url)}"`);
+  for (const reaction of node.reactions ?? []) {
+    const destination = reactionDestinationId(reaction);
+    if (destination) attrs.push(`prototypeNode="${escapeXml(destination)}"`);
+  }
   const children = node.children ?? [];
   if (!children.length) {
     return `${pad}<node ${attrs.join(" ")} />`;
   }
   const inner = children.map((child) => nodeToXml(child, indent + 1)).join("\n");
   return `${pad}<node ${attrs.join(" ")}>\n${inner}\n${pad}</node>`;
+}
+
+function reactionDestinationId(reaction: unknown): string | undefined {
+  if (!reaction || typeof reaction !== "object" || Array.isArray(reaction)) return undefined;
+  const action = (reaction as Record<string, unknown>).action;
+  if (!action || typeof action !== "object" || Array.isArray(action)) return undefined;
+  const destination = (action as Record<string, unknown>).destination;
+  if (!destination || typeof destination !== "object" || Array.isArray(destination)) {
+    return undefined;
+  }
+  const id = (destination as Record<string, unknown>).destinationNodeId ?? (destination as Record<string, unknown>).nodeId;
+  return typeof id === "string" && /^\d+:\d+$/.test(id) ? id : undefined;
 }
 
 function round(n: number): string {
@@ -188,6 +210,10 @@ export type DesignContextNode = {
   componentProperties?: Record<string, unknown>;
   styles?: Record<string, string>;
   styleNames?: Record<string, string>;
+  /** REST hyperlink; `nodeId` points at an internal screen/component. */
+  hyperlink?: { url?: string; nodeId?: string };
+  /** REST prototype reactions, passed through for pointer resolution. */
+  reactions?: Record<string, unknown>[];
   children?: DesignContextNode[];
   childrenTruncated?: boolean;
 };
@@ -198,6 +224,18 @@ export type DesignContextRefs = {
   styles?: Record<string, { key?: string; name?: string; styleType?: string }>;
 };
 
+/** Blocks a caller may select with `fields`; omitted means all. */
+export const DESIGN_CONTEXT_FIELDS = [
+  "layout",
+  "visual",
+  "fills",
+  "strokes",
+  "text",
+  "component",
+] as const;
+
+export type DesignContextField = (typeof DESIGN_CONTEXT_FIELDS)[number];
+
 export type DesignContextOptions = {
   /** Levels of children kept below the root; a node cut there sets `childrenTruncated`. */
   maxDepth?: number;
@@ -207,6 +245,8 @@ export type DesignContextOptions = {
   maxBytes?: number;
   /** `components`, `componentSets`, and `styles` maps from the REST response. */
   refs?: DesignContextRefs;
+  /** Emit only these blocks per node (`layout`, `visual`, `fills`, `strokes`, `text`, `component`). Omit for all. */
+  fields?: readonly string[];
 };
 
 /** Default subtree cap for `figma_get_design_context`. */
@@ -249,6 +289,11 @@ export function toDesignContextNodes(
     byteHit: false,
   };
   const maxDepth = options.maxDepth ?? Number.POSITIVE_INFINITY;
+  const fields = options.fields?.length
+    ? new Set<string>(options.fields.filter((field) =>
+        (DESIGN_CONTEXT_FIELDS as readonly string[]).includes(field),
+      ))
+    : undefined;
   const refs = options.refs ?? {};
   const out: DesignContextNode[] = [];
   for (const node of nodes) {
@@ -260,7 +305,7 @@ export function toDesignContextNodes(
       budget.byteHit = true;
       break;
     }
-    out.push(contextNode(node, 0, maxDepth, refs, budget));
+    out.push(contextNode(node, 0, maxDepth, refs, budget, fields));
   }
   return { nodes: out, nodeLimitHit: budget.nodeHit, byteLimitHit: budget.byteHit };
 }
@@ -292,7 +337,9 @@ function contextNode(
   maxDepth: number,
   refs: DesignContextRefs,
   budget: ContextBudget,
+  fields?: Set<string>,
 ): DesignContextNode {
+  const want = (field: DesignContextField): boolean => !fields || fields.has(field);
   const own = ownByteSize(node);
   const bodyCut = own > budget.bytesLeft;
   const body = bodyCut ? slimFigmaNode(node) : node;
@@ -301,6 +348,75 @@ function contextNode(
   budget.bytesLeft -= ownByteSize(body);
 
   const box = body.absoluteBoundingBox;
+  let layout: Record<string, unknown> | undefined;
+  if (want("layout")) {
+    layout = collectLayout(body);
+  }
+  const text = want("text") ? toText(body) : undefined;
+  const visual = want("visual") ? toVisual(body) : undefined;
+
+  const nested = node.children ?? [];
+  const depthCut = nested.length > 0 && depth >= maxDepth;
+  let childCut = false;
+  const kept: DesignContextNode[] = [];
+  if (!depthCut && !bodyCut) {
+    for (const child of nested) {
+      if (budget.nodesLeft <= 0) {
+        budget.nodeHit = true;
+        childCut = true;
+        break;
+      }
+      if (budget.bytesLeft <= 0) {
+        budget.byteHit = true;
+        childCut = true;
+        break;
+      }
+      kept.push(contextNode(child, depth + 1, maxDepth, refs, budget, fields));
+    }
+    if (kept.length < nested.length) childCut = true;
+  }
+  const childrenTruncated = depthCut || bodyCut || childCut;
+  const children = kept.length ? kept : undefined;
+  const hyperlink = toHyperlink(body);
+  const reactions = toReactions(body);
+  const maskType =
+    body.isMask === true && typeof body.maskType === "string" && body.maskType
+      ? body.maskType
+      : undefined;
+
+  const out: DesignContextNode = {
+    id: body.id,
+    name: body.name,
+    type: body.type,
+    visible: body.visible === false ? false : undefined,
+    isMask: body.isMask === true ? true : undefined,
+    maskType,
+    size: box ? { width: box.width, height: box.height } : undefined,
+    position: box ? { x: box.x, y: box.y } : undefined,
+    layout,
+    visual,
+    fills: want("fills") ? body.fills : undefined,
+    strokes: want("strokes") ? body.strokes : undefined,
+    text,
+    hyperlink: Object.keys(hyperlink ?? {}).length ? hyperlink : undefined,
+    reactions: reactions?.length ? reactions : undefined,
+    children: children?.length ? children : undefined,
+    childrenTruncated: childrenTruncated || undefined,
+  };
+  if (want("component")) {
+    out.componentId = body.componentId;
+    out.component = toComponent(body.componentId, refs);
+    out.componentProperties =
+      body.componentProperties && Object.keys(body.componentProperties).length
+        ? body.componentProperties
+        : undefined;
+    out.styles = body.styles;
+    out.styleNames = toStyleNames(body.styles, refs);
+  }
+  return out;
+}
+
+function collectLayout(body: FigmaNode): Record<string, unknown> | undefined {
   const layout: Record<string, unknown> = {};
   if (body.layoutMode) layout.mode = body.layoutMode;
   if (body.itemSpacing != null) layout.gap = body.itemSpacing;
@@ -335,60 +451,25 @@ function contextNode(
   ] as const) {
     if (body[key] != null) layout[key] = body[key];
   }
+  return Object.keys(layout).length ? layout : undefined;
+}
 
-  const text = toText(body);
-  const visual = toVisual(body);
+function toHyperlink(node: FigmaNode): { url?: string; nodeId?: string } | undefined {
+  const link = node.hyperlink;
+  if (!link || typeof link !== "object") return undefined;
+  const out: { url?: string; nodeId?: string } = {};
+  if (typeof link.url === "string") out.url = link.url;
+  if (typeof link.nodeId === "string") out.nodeId = link.nodeId;
+  return Object.keys(out).length ? out : undefined;
+}
 
-  const nested = node.children ?? [];
-  const depthCut = nested.length > 0 && depth >= maxDepth;
-  let childCut = false;
-  const kept: DesignContextNode[] = [];
-  if (!depthCut && !bodyCut) {
-    for (const child of nested) {
-      if (budget.nodesLeft <= 0) {
-        budget.nodeHit = true;
-        childCut = true;
-        break;
-      }
-      if (budget.bytesLeft <= 0) {
-        budget.byteHit = true;
-        childCut = true;
-        break;
-      }
-      kept.push(contextNode(child, depth + 1, maxDepth, refs, budget));
-    }
-    if (kept.length < nested.length) childCut = true;
-  }
-  const childrenTruncated = depthCut || bodyCut || childCut;
-  const children = kept.length ? kept : undefined;
-  const properties = body.componentProperties;
-  const maskType =
-    body.isMask === true && typeof body.maskType === "string" && body.maskType
-      ? body.maskType
-      : undefined;
-
-  return {
-    id: body.id,
-    name: body.name,
-    type: body.type,
-    visible: body.visible === false ? false : undefined,
-    isMask: body.isMask === true ? true : undefined,
-    maskType,
-    size: box ? { width: box.width, height: box.height } : undefined,
-    position: box ? { x: box.x, y: box.y } : undefined,
-    layout: Object.keys(layout).length ? layout : undefined,
-    visual,
-    fills: body.fills,
-    strokes: body.strokes,
-    text,
-    componentId: body.componentId,
-    component: toComponent(body.componentId, refs),
-    componentProperties: properties && Object.keys(properties).length ? properties : undefined,
-    styles: body.styles,
-    styleNames: toStyleNames(body.styles, refs),
-    children: children?.length ? children : undefined,
-    childrenTruncated: childrenTruncated || undefined,
-  };
+function toReactions(node: FigmaNode): Record<string, unknown>[] | undefined {
+  if (!Array.isArray(node.reactions)) return undefined;
+  const out = node.reactions.filter(
+    (reaction): reaction is Record<string, unknown> =>
+      !!reaction && typeof reaction === "object" && !Array.isArray(reaction),
+  );
+  return out.length ? out : undefined;
 }
 
 function toComponent(

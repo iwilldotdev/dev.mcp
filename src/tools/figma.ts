@@ -136,7 +136,7 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
 
   server.tool(
     "figma_get_design_context",
-    "Implementation context (layout, fixed sizing, effects, text, hidden layers, masks, component variants, style names, screenshot URL) composed via REST. Variables are off unless includeVariables is true; a variables failure is a warning and does not drop nodes or truncate the tree. A node id returns its subtree until depth or the node/byte cap cuts it; a cut sets truncated and truncation.hint. A call without a node id is cut at file depth 3. Missing ids are listed in missingNodeIds. A screenshot failure is a warning and does not drop nodes. Rotation is passed through as REST returns it (unit not documented). Not the official MCP proprietary codegen.",
+    "Implementation context (layout, fixed sizing, effects, text, hidden layers, masks, component variants, style names, hyperlink/prototype pointers, screenshot URL) composed via REST. Variables are off unless includeVariables is true; a variables failure is a warning and does not drop nodes or truncate the tree. A node id returns its subtree until depth or the node/byte cap cuts it; a cut sets truncated, truncation.hint and truncation.nextChildIds (refetch those ids). fields selects blocks (layout, visual, fills, strokes, text, component) to shrink the payload. The payload carries lastModified for pack freshness checks. A call without a node id is cut at file depth 3. Missing ids are listed in missingNodeIds. A screenshot failure is a warning and does not drop nodes. Rotation is passed through as REST returns it (unit not documented). Not the official MCP proprietary codegen.",
     {
       ...fileKeyShape,
       nodeIds: z
@@ -156,6 +156,10 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
         .boolean()
         .optional()
         .describe("Default: false. The same tree as XML; figma_get_metadata returns it alone."),
+      fields: z
+        .array(z.enum(["layout", "visual", "fills", "strokes", "text", "component"]))
+        .optional()
+        .describe("Emit only these blocks per node. Default: all."),
     },
     wrapTool(async (args) => {
       const parsed = args.url ? parseFigmaUrl(args.url) : { fileKey: fileKeyFrom(args) };
@@ -170,8 +174,66 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
           includeScreenshot: args.includeScreenshot,
           includeVariables: args.includeVariables,
           includeMetadataXml: args.includeMetadataXml,
+          fields: args.fields,
         }),
       );
+    }),
+  );
+
+  server.tool(
+    "figma_get_file_meta",
+    "Cheap freshness check: file name and lastModified (GET /v1/files/:key at depth 1). Use it to decide whether a persisted Figma pack is stale before refetching node contexts.",
+    fileKeyShape,
+    wrapTool(async (args) => {
+      const fileKey = fileKeyFrom(args);
+      const file = await client(runtime).getFile(fileKey, { depth: 1 });
+      return {
+        fileKey,
+        name: file.name,
+        lastModified: file.lastModified,
+        version: file.version,
+      };
+    }),
+  );
+
+  server.tool(
+    "figma_get_frames",
+    "Frame index for a file (GET /v1/files/:key at depth 2): id, name, type, size, and page for every top-level frame — the ticket x frame join surface. One REST call; use pageName to filter.",
+    {
+      ...fileKeyShape,
+      pageName: z.string().optional().describe("Case-insensitive substring filter on the page name."),
+    },
+    wrapTool(async (args) => {
+      const fileKey = fileKeyFrom(args);
+      const file = await client(runtime).getFile(fileKey, { depth: 2 });
+      const document = file.document as FigmaNode | undefined;
+      const frames: Array<{
+        id: string;
+        name: string;
+        type: string;
+        width?: number;
+        height?: number;
+        page: string;
+      }> = [];
+      for (const page of document?.children ?? []) {
+        if (page.visible === false) continue;
+        const pageName = page.name ?? "";
+        if (args.pageName && !pageName.toLowerCase().includes(args.pageName.toLowerCase())) {
+          continue;
+        }
+        for (const frame of page.children ?? []) {
+          if (frame.visible === false) continue;
+          frames.push({
+            id: frame.id,
+            name: frame.name ?? "",
+            type: frame.type ?? "",
+            width: frame.absoluteBoundingBox?.width,
+            height: frame.absoluteBoundingBox?.height,
+            page: pageName,
+          });
+        }
+      }
+      return { fileKey, name: file.name, lastModified: file.lastModified, frames };
     }),
   );
 
