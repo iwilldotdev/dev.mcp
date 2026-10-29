@@ -1,7 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { normalizeIssue } from "../src/adf.js";
+import { richContent, type DownloadedImage } from "../src/jira/rich-issue.js";
 import { inspectImage } from "../src/figma/image.js";
 import { collectFrames, type FigmaNode } from "../src/figma/parse.js";
+
+function doc(before: string, mediaId: string, after: string) {
+  return {
+    type: "doc",
+    content: [
+      { type: "paragraph", content: [{ type: "text", text: before }] },
+      { type: "mediaSingle", content: [{ type: "media", attrs: { id: mediaId } }] },
+      { type: "paragraph", content: [{ type: "text", text: after }] },
+    ],
+  };
+}
 
 const PNG_1X1 = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
@@ -86,6 +98,43 @@ describe("normalizeIssue", () => {
     expect(normalized.links.map((link) => link.source).sort()).toEqual(["description", "issuelink", "remotelink"]);
     expect(normalized.attachments).toEqual([{ id: "10", filename: "error.png", mimeType: "image/png", source: "attachment" }]);
     expect(normalized.unknowns).toEqual([]);
+  });
+
+  it("keeps each image between the text of the description and of a comment", () => {
+    const normalized = normalizeIssue(
+      {
+        key: "DEV-3",
+        fields: {
+          summary: "Retorno",
+          description: doc("Antes da descrição", "m1", "Depois da descrição"),
+        },
+      },
+      [],
+      { comments: [{ id: "9", author: { displayName: "QA" }, created: "2026-10-29T12:00:00.000Z", body: doc("Antes do comentário", "m2", "Depois do comentário") }] },
+    );
+    expect(normalized.descriptionParts.map((part) => part.type === "text" ? part.text : part.id)).toEqual(["Antes da descrição", "m1", "Depois da descrição"]);
+    expect(normalized.comments[0]?.parts.map((part) => part.type === "text" ? part.text : part.id)).toEqual(["Antes do comentário", "m2", "Depois do comentário"]);
+    const png = PNG_1X1;
+    const downloads: DownloadedImage[] = [
+      { url: "https://cdn/desc.png", source: "description", downloaded: true, mime: "image/png", data: png },
+      { url: "https://cdn/comment.png", source: "comment", commentId: "9", downloaded: true, mime: "image/png", data: png },
+    ];
+    const content = richContent(normalized, {
+      description: ["https://cdn/desc.png"],
+      comments: [{ id: "9", urls: ["https://cdn/comment.png"] }],
+      attachments: [],
+    }, downloads, 0);
+    expect(content.map((block) => block.type === "text" ? block.text : "image")).toEqual([
+      expect.any(String),
+      "Descrição",
+      "Antes da descrição",
+      "image",
+      "Depois da descrição",
+      "Comentário — QA — 2026-10-29T12:00:00.000Z",
+      "Antes do comentário",
+      "image",
+      "Depois do comentário",
+    ]);
   });
 
   it("names missing description and criteria instead of inventing them", () => {

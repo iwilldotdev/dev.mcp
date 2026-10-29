@@ -118,6 +118,44 @@ export class JiraClient {
     );
   }
 
+  getComments(issueIdOrKey: string): Promise<{ comments: unknown[]; truncated: boolean }> {
+    return this.collectComments(issueIdOrKey);
+  }
+
+  download(url: string) {
+    const absolute = url.startsWith("http://") || url.startsWith("https://")
+      ? url
+      : new URL(url, this.config.baseUrl).toString();
+    return this.http.bytes(absolute, {
+      headers: {
+        Authorization: basicAuth(this.config.email, this.config.apiToken),
+        Accept: "*/*",
+      },
+    });
+  }
+
+  private async collectComments(issueIdOrKey: string): Promise<{ comments: unknown[]; truncated: boolean }> {
+    const comments: unknown[] = [];
+    let startAt = 0;
+    let total = Number.POSITIVE_INFINITY;
+    while (comments.length < total && comments.length < 200) {
+      const page = await this.http.json<{ comments?: unknown[]; total?: number }>(
+        withQuery(this.url(`/issue/${encodeURIComponent(issueIdOrKey)}/comment`), {
+          startAt,
+          maxResults: 100,
+          expand: "renderedBody",
+        }),
+        { headers: this.headers() },
+      );
+      const batch = Array.isArray(page.comments) ? page.comments : [];
+      total = typeof page.total === "number" ? page.total : startAt + batch.length;
+      comments.push(...batch);
+      if (batch.length === 0) break;
+      startAt += batch.length;
+    }
+    return { comments, truncated: comments.length < total };
+  }
+
   getRemoteIssueLinks(issueIdOrKey: string) {
     return this.http.json(
       this.url(`/issue/${encodeURIComponent(issueIdOrKey)}/remotelink`),

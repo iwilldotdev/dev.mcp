@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { maybeAdf, normalizeIssue } from "../adf.js";
+import { maybeAdf } from "../adf.js";
+import { readRichIssue } from "../jira/rich-issue.js";
 import { JiraClient } from "../clients/jira.js";
 import { requireAtlassian } from "../config.js";
 import type { Runtime } from "../runtime.js";
@@ -26,19 +27,20 @@ export function registerJiraTools(server: McpServer, runtime: Runtime): void {
 
   server.tool(
     "jira_normalize_issue",
-    "Reads an issue plus remote links and returns schemaVersion 1 text, acceptance criteria, links, referenced attachments, and explicit unknowns. ADF stays data; it is not executed.",
+    "Reads an issue, its comment thread, remote links, and image bytes from the description, comments, and image attachments. Returns schemaVersion 1 text, acceptance criteria, links, and explicit unknowns. ADF stays data; it is not executed.",
     {
       issueIdOrKey: z.string().describe("Key or ID, e.g. ABC-123."),
-      fields: z.string().optional().describe("CSV fields. Omit for the Jira default set."),
     },
-    wrapTool(async (args) => {
-      const jira = client(runtime);
-      const [issue, remoteLinks] = await Promise.all([
-        jira.getIssue(args.issueIdOrKey, { fields: args.fields }),
-        jira.getRemoteIssueLinks(args.issueIdOrKey),
-      ]);
-      return normalizeIssue(issue, remoteLinks);
-    }),
+    wrapTool(async (args) => readRichIssue(client(runtime), args.issueIdOrKey)),
+  );
+
+  server.tool(
+    "jira_get_comments",
+    "Reads the comment thread of an issue, including author, text, links, and the images embedded in those comments and in the description.",
+    {
+      issueIdOrKey: z.string().describe("Key or ID, e.g. ABC-123."),
+    },
+    wrapTool(async (args) => readRichIssue(client(runtime), args.issueIdOrKey)),
   );
 
   server.tool(

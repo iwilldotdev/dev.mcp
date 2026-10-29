@@ -17,6 +17,8 @@ export function inspectImage(data: Buffer, mime = "application/octet-stream"): I
     inspection.mime = "image/png";
     inspection.width = data.readUInt32BE(16);
     inspection.height = data.readUInt32BE(20);
+  } else if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
+    inspection.mime = "image/jpeg";
   }
   return inspection;
 }
