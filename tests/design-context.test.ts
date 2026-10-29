@@ -400,4 +400,40 @@ describe("buildDesignContext", () => {
       expect(cut).toMatch(/^\d+:\d+$/);
     }
   });
+
+  it("is complete only for an addressed node with its screenshot", async () => {
+    const api = source({
+      async getNodes() {
+        return { name: "File", nodes: { "1:1": { document: frame("1:1") } } };
+      },
+      async getImages(_fileKey, ids, params) {
+        expect(params?.scale).toBe(1);
+        return { images: Object.fromEntries(ids.map((id) => [id, "https://example.test/1.png"])) };
+      },
+    });
+    const payload = await buildDesignContext(api, {
+      fileKey: "abc",
+      nodeIds: ["1:1"],
+      includeVariables: false,
+    });
+    expect(payload.schemaVersion).toBe(1);
+    expect(payload.screenshot).toEqual({ format: "png", scale: 1 });
+    expect(payload.completeness).toEqual({ status: "complete", reasons: [] });
+  });
+
+  it("does not screenshot the file root when no node id is given", async () => {
+    const api = source({
+      async getFile() {
+        return { name: "File", document: frame("0:1") };
+      },
+      async getImages() {
+        throw new Error("root screenshot");
+      },
+    });
+    const payload = await buildDesignContext(api, { fileKey: "abc", includeVariables: false });
+    expect(payload.completeness.reasons).toContain("node-id-required");
+    expect(payload.completeness.status).toBe("incomplete");
+    expect(payload.screenshots).toBeUndefined();
+    expect(payload.warnings.join(" ")).toContain("node-id required");
+  });
 });

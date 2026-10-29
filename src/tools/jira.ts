@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { maybeAdf } from "../adf.js";
+import { maybeAdf, normalizeIssue } from "../adf.js";
 import { JiraClient } from "../clients/jira.js";
 import { requireAtlassian } from "../config.js";
 import type { Runtime } from "../runtime.js";
@@ -22,6 +22,23 @@ export function registerJiraTools(server: McpServer, runtime: Runtime): void {
     wrapTool(async (args) =>
       client(runtime).getIssue(args.issueIdOrKey, { fields: args.fields, expand: args.expand }),
     ),
+  );
+
+  server.tool(
+    "jira_normalize_issue",
+    "Reads an issue plus remote links and returns schemaVersion 1 text, acceptance criteria, links, referenced attachments, and explicit unknowns. ADF stays data; it is not executed.",
+    {
+      issueIdOrKey: z.string().describe("Key or ID, e.g. ABC-123."),
+      fields: z.string().optional().describe("CSV fields. Omit for the Jira default set."),
+    },
+    wrapTool(async (args) => {
+      const jira = client(runtime);
+      const [issue, remoteLinks] = await Promise.all([
+        jira.getIssue(args.issueIdOrKey, { fields: args.fields }),
+        jira.getRemoteIssueLinks(args.issueIdOrKey),
+      ]);
+      return normalizeIssue(issue, remoteLinks);
+    }),
   );
 
   server.tool(

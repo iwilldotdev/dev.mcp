@@ -9,6 +9,7 @@ export type HttpRequestInit = RequestInit & {
   timeoutMs?: number;
   maxRetries?: number;
   retryOn?: number[];
+  raw?: boolean;
 };
 
 export type HttpClientOptions = {
@@ -123,7 +124,7 @@ export class HttpClient {
           continue;
         }
 
-        const body = await readBody(res);
+        const body = init.raw ? Buffer.from(await res.arrayBuffer()) : await readBody(res);
         if (!res.ok) {
           throw new ApiError(
             formatErrorMessage(res.status, url, body),
@@ -159,6 +160,14 @@ export class HttpClient {
   async json<T>(url: string, init: HttpRequestInit = {}): Promise<T> {
     const { body } = await this.request(url, init);
     return body as T;
+  }
+
+  async bytes(url: string, init: HttpRequestInit = {}): Promise<{ mime: string; data: Buffer }> {
+    const { headers, body } = await this.request(url, { ...init, raw: true });
+    return {
+      mime: headers.get("content-type")?.split(";")[0]?.trim() || "application/octet-stream",
+      data: Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? "")),
+    };
   }
 }
 

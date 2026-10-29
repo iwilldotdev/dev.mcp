@@ -17,6 +17,7 @@ import {
   type FigmaNode,
 } from "./parse.js";
 
+export const DESIGN_CONTEXT_SCHEMA_VERSION = 1;
 export const DESIGN_CONTEXT_TRUNCATION_HINT =
   "Pass depth or a child node id to fetch the next level.";
 /** Cap on the actionable list of node ids whose children were cut. */
@@ -46,13 +47,19 @@ export type DesignContextRequest = {
   includeMetadataXml?: boolean;
   /** Emit only these blocks per node (`layout`, `visual`, `fills`, `strokes`, `text`, `component`). */
   fields?: string[];
+  /** Canonical comparison uses CSS pixels. Default: 1. */
+  screenshotScale?: number;
+  screenshotFormat?: "jpg" | "png" | "svg" | "pdf";
   /** Defaults to the design-context node and byte caps. */
   limits?: { maxNodes: number; maxBytes: number };
 };
 
 export type DesignContextPayload = {
+  schemaVersion: number;
   fileKey: string;
   name?: string;
+  completeness: { status: "complete" | "incomplete"; reasons: string[] };
+  screenshot?: { format: "jpg" | "png" | "svg" | "pdf"; scale: number };
   /** REST file revision at fetch time; a pack consumer compares it to detect staleness. */
   lastModified?: string;
   note: string;
@@ -85,6 +92,8 @@ export async function buildDesignContext(
   };
   const includeScreenshot = request.includeScreenshot !== false;
   const includeVariables = request.includeVariables === true;
+  const screenshotFormat = request.screenshotFormat ?? "png";
+  const screenshotScale = request.screenshotScale ?? 1;
   const nodeIds = request.nodeIds?.length ? request.nodeIds : undefined;
 
   let rawNodes: FigmaNode[] = [];
@@ -133,13 +142,16 @@ export async function buildDesignContext(
   if (tree.nodeLimitHit) reasons.push("node-limit");
   if (tree.byteLimitHit) reasons.push("byte-limit");
 
-  const screenshotIds = nodeIds?.length ? nodeIds : rawNodes.slice(0, 1).map((node) => node.id);
+  const screenshotIds = nodeIds ?? [];
   const [variablesResult, screenshotResult] = await Promise.allSettled([
     includeVariables
       ? source.getLocalVariables(request.fileKey).then(summarizeVariables)
       : Promise.resolve(undefined),
     includeScreenshot && screenshotIds.length
-      ? source.getImages(request.fileKey, screenshotIds, { format: "png", scale: 2 })
+      ? source.getImages(request.fileKey, screenshotIds, {
+          format: screenshotFormat,
+          scale: screenshotScale,
+        })
       : Promise.resolve(undefined),
   ]);
 
@@ -150,12 +162,17 @@ export async function buildDesignContext(
     else warnings.push(`variables: ${errorMessage(variablesResult.reason)}`);
   }
   let screenshots: Record<string, string | null> | undefined;
-  if (includeScreenshot && screenshotIds.length) {
+  if (!nodeIds && includeScreenshot) {
+    warnings.push("screenshot skipped: node-id required");
+  } else if (includeScreenshot && screenshotIds.length) {
     if (screenshotResult.status === "fulfilled") screenshots = screenshotResult.value?.images;
     else warnings.push(`screenshot: ${errorMessage(screenshotResult.reason)}`);
   }
 
   const payload: DesignContextPayload = {
+    schemaVersion: DESIGN_CONTEXT_SCHEMA_VERSION,
+    completeness: { status: "incomplete", reasons: ["pending"] },
+    screenshot: includeScreenshot ? { format: screenshotFormat, scale: screenshotScale } : undefined,
     fileKey: request.fileKey,
     name: fileName,
     lastModified,
@@ -181,7 +198,27 @@ export async function buildDesignContext(
       ...(nextChildIds.length ? { nextChildIds } : {}),
     };
   }
+  payload.completeness = deriveCompleteness(payload, Boolean(nodeIds), includeScreenshot, screenshotIds);
   return payload;
+}
+
+function deriveCompleteness(
+  payload: DesignContextPayload,
+  hadNodeIds: boolean,
+  includeScreenshot: boolean,
+  screenshotIds: string[],
+): { status: "complete" | "incomplete"; reasons: string[] } {
+  const reasons: string[] = [];
+  if (!hadNodeIds) reasons.push("node-id-required");
+  if (payload.truncated) reasons.push("truncated");
+  if (payload.missingNodeIds?.length) reasons.push("missing-nodes");
+  if (payload.warnings.some((warning) => !warning.startsWith("variables:"))) reasons.push("warnings");
+  if (includeScreenshot && hadNodeIds) {
+    const images = payload.screenshots ?? {};
+    const missing = screenshotIds.filter((id) => !images[id] && !images[id.replaceAll(":", "-")]);
+    if (missing.length) reasons.push("screenshot-missing");
+  }
+  return { status: reasons.length ? "incomplete" : "complete", reasons };
 }
 
 function collectCutNodeIds(nodes: DesignContextNode[]): string[] {

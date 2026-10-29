@@ -642,6 +642,63 @@ function normalizeBoundVariable(
   return undefined;
 }
 
+export type FigmaFrameIndexEntry = {
+  id: string;
+  name: string;
+  type: string;
+  width?: number;
+  height?: number;
+  page: string;
+  pagePath: string[];
+  sectionPath: string[];
+};
+
+const INDEXED_FRAME_TYPES = new Set(["FRAME", "COMPONENT", "COMPONENT_SET"]);
+
+/** Walk pages and nested sections. Inner frames are included until `maxFrames`. */
+export function collectFrames(
+  document: FigmaNode | undefined,
+  options: { maxFrames?: number; pageName?: string } = {},
+): { frames: FigmaFrameIndexEntry[]; truncated: boolean } {
+  const maxFrames = options.maxFrames ?? 500;
+  const frames: FigmaFrameIndexEntry[] = [];
+  let truncated = false;
+  const pageFilter = options.pageName?.toLowerCase();
+
+  const walk = (node: FigmaNode, pagePath: string[], sectionPath: string[]): void => {
+    for (const child of node.children ?? []) {
+      if (truncated || child.visible === false) continue;
+      const nextSection =
+        child.type === "SECTION" ? [...sectionPath, child.name ?? ""] : sectionPath;
+      if (INDEXED_FRAME_TYPES.has(child.type)) {
+        if (frames.length >= maxFrames) {
+          truncated = true;
+          return;
+        }
+        frames.push({
+          id: child.id,
+          name: child.name ?? "",
+          type: child.type,
+          width: child.absoluteBoundingBox?.width,
+          height: child.absoluteBoundingBox?.height,
+          page: pagePath[0] ?? "",
+          pagePath,
+          sectionPath: nextSection,
+        });
+      }
+      if (child.children?.length) walk(child, pagePath, nextSection);
+    }
+  };
+
+  for (const page of document?.children ?? []) {
+    if (page.visible === false) continue;
+    const pageName = page.name ?? "";
+    if (pageFilter && !pageName.toLowerCase().includes(pageFilter)) continue;
+    walk(page, [pageName], []);
+  }
+  return { frames, truncated };
+}
+
 export function summarizeVariables(payload: unknown): unknown {
   if (!payload || typeof payload !== "object") return payload;
   const data = payload as {

@@ -4,6 +4,7 @@ import { requireFigma } from "../config.js";
 import { FigmaClient } from "../clients/figma.js";
 import { buildDesignContext } from "../figma/design-context.js";
 import {
+  collectFrames,
   nodeToXml,
   parseFigmaFileKey,
   parseFigmaNodeIds,
@@ -12,7 +13,7 @@ import {
   type FigmaNode,
 } from "../figma/parse.js";
 import type { Runtime } from "../runtime.js";
-import { wrapTool } from "./result.js";
+import { rawResult, wrapTool } from "./result.js";
 
 function client(runtime: Runtime): FigmaClient {
   return new FigmaClient(requireFigma(runtime.config), runtime.http, runtime.figmaCache);
@@ -160,6 +161,13 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
         .array(z.enum(["layout", "visual", "fills", "strokes", "text", "component"]))
         .optional()
         .describe("Emit only these blocks per node. Default: all."),
+      screenshotScale: z
+        .number()
+        .min(0.01)
+        .max(4)
+        .optional()
+        .describe("Screenshot scale. Default 1, so pixels match CSS pixels."),
+      screenshotFormat: z.enum(["png", "jpg", "svg", "pdf"]).optional().describe("Default: png."),
     },
     wrapTool(async (args) => {
       const parsed = args.url ? parseFigmaUrl(args.url) : { fileKey: fileKeyFrom(args) };
@@ -175,8 +183,58 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
           includeVariables: args.includeVariables,
           includeMetadataXml: args.includeMetadataXml,
           fields: args.fields,
+          screenshotScale: args.screenshotScale,
+          screenshotFormat: args.screenshotFormat,
         }),
       );
+    }),
+  );
+
+  server.tool(
+    "figma_fetch_screenshot",
+    "Downloads rendered node images and returns image bytes plus sha256, MIME, and dimensions. Does not rely on a temporary Figma URL remaining valid. Canonical scale is 1.",
+    {
+      ...fileKeyShape,
+      nodeIds: z.union([z.string(), z.array(z.string())]).describe("Node IDs to render."),
+      format: z.enum(["png", "jpg", "svg", "pdf"]).optional(),
+      scale: z.number().min(0.01).max(4).optional().describe("Default: 1."),
+    },
+    wrapTool(async (args) => {
+      const fileKey = fileKeyFrom(args);
+      const fromUrl = args.url ? parseFigmaUrl(args.url).nodeIds : undefined;
+      const ids = parseFigmaNodeIds(args.nodeIds) ?? fromUrl;
+      if (!ids?.length) throw new Error("Provide nodeIds (or a URL with node-id).");
+      const figma = client(runtime);
+      const rendered = await figma.getImages(fileKey, ids, {
+        format: args.format ?? "png",
+        scale: args.scale ?? 1,
+      });
+      const images = [];
+      const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];
+      for (const id of ids) {
+        const url = rendered.images?.[id] ?? rendered.images?.[id.replaceAll(":", "-")];
+        if (!url) {
+          images.push({ nodeId: id, error: "missing render URL" });
+          continue;
+        }
+        const image = await figma.fetchImage(url);
+        images.push({
+          nodeId: id,
+          sha256: image.sha256,
+          mime: image.mime,
+          width: image.width,
+          height: image.height,
+          byteLength: image.byteLength,
+        });
+        if (image.mime.startsWith("image/")) {
+          content.push({ type: "image", data: image.data.toString("base64"), mimeType: image.mime });
+        }
+      }
+      content.unshift({
+        type: "text",
+        text: JSON.stringify({ schemaVersion: 1, fileKey, scale: args.scale ?? 1, images }),
+      });
+      return rawResult(content);
     }),
   );
 
@@ -198,42 +256,27 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
 
   server.tool(
     "figma_get_frames",
-    "Frame index for a file (GET /v1/files/:key at depth 2): id, name, type, size, and page for every top-level frame — the ticket x frame join surface. One REST call; use pageName to filter.",
+    "Recursive frame index (GET /v1/files/:key): id, name, type, size, pagePath, and sectionPath, including frames nested in sections. One REST call; pageName filters pages.",
     {
       ...fileKeyShape,
       pageName: z.string().optional().describe("Case-insensitive substring filter on the page name."),
+      depth: z.number().int().min(1).max(8).optional().describe("Document depth. Default: 4."),
     },
     wrapTool(async (args) => {
       const fileKey = fileKeyFrom(args);
-      const file = await client(runtime).getFile(fileKey, { depth: 2 });
-      const document = file.document as FigmaNode | undefined;
-      const frames: Array<{
-        id: string;
-        name: string;
-        type: string;
-        width?: number;
-        height?: number;
-        page: string;
-      }> = [];
-      for (const page of document?.children ?? []) {
-        if (page.visible === false) continue;
-        const pageName = page.name ?? "";
-        if (args.pageName && !pageName.toLowerCase().includes(args.pageName.toLowerCase())) {
-          continue;
-        }
-        for (const frame of page.children ?? []) {
-          if (frame.visible === false) continue;
-          frames.push({
-            id: frame.id,
-            name: frame.name ?? "",
-            type: frame.type ?? "",
-            width: frame.absoluteBoundingBox?.width,
-            height: frame.absoluteBoundingBox?.height,
-            page: pageName,
-          });
-        }
-      }
-      return { fileKey, name: file.name, lastModified: file.lastModified, frames };
+      const file = await client(runtime).getFile(fileKey, { depth: args.depth ?? 4 });
+      const indexed = collectFrames(file.document as FigmaNode | undefined, {
+        pageName: args.pageName,
+      });
+      return {
+        schemaVersion: 1,
+        fileKey,
+        name: file.name,
+        lastModified: file.lastModified,
+        version: file.version,
+        truncated: indexed.truncated,
+        frames: indexed.frames,
+      };
     }),
   );
 

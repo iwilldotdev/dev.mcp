@@ -1,5 +1,6 @@
 import { cacheKey, type MemoryCache } from "../cache.js";
 import type { FigmaConfig } from "../config.js";
+import { inspectImage, type ImageInspection } from "../figma/image.js";
 import type { HttpClient } from "../http.js";
 import { withQuery } from "../http.js";
 
@@ -117,6 +118,11 @@ export class FigmaClient {
     return this.cached(cacheKey(["figma", "images", url]), () =>
       this.http.json<FigmaImagesResponse>(url, { headers: this.headers() }),
     );
+  }
+
+  async fetchImage(url: string): Promise<ImageInspection & { data: Buffer }> {
+    const downloaded = await this.http.bytes(url);
+    return { ...inspectImage(downloaded.data, downloaded.mime), data: downloaded.data };
   }
 
   async getImageFills(fileKey: string): Promise<unknown> {
