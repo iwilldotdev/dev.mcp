@@ -77,6 +77,8 @@ Stable prefixes: `figma_*`, `jira_*`, `confluence_*`, `gitlab_*`.
 
 ### Figma
 
+Tools listed under [Saving payloads to disk](#saving-payloads-to-disk) accept an optional `save_to`.
+
 
 | Tool                       | REST                                                                                                      |
 | -------------------------- | --------------------------------------------------------------------------------------------------------- |
@@ -108,6 +110,33 @@ Stable prefixes: `figma_*`, `jira_*`, `confluence_*`, `gitlab_*`.
 `glab` fallback: `glab api` with the same paths. If `glab` is not on PATH and the API fails, the tool returns instructions to install `glab` or export `GITLAB_TOKEN`.
 
 Providers without credentials stay listed: the tool returns a clear message instead of crashing the process.
+
+## Saving payloads to disk
+
+These read tools accept an optional `save_to` (absolute path) so an agent can persist a large raw payload without echoing it through the model:
+
+| Tools | `save_to` | Written |
+| ----- | --------- | ------- |
+| `figma_get_design_context`, `figma_get_metadata`, `figma_get_file_meta`, `figma_get_file`, `figma_get_frames`, `figma_get_variable_defs`, `gitlab_get_merge_request`, `gitlab_list_merge_requests`, `gitlab_get_pipeline`, `gitlab_get_pipeline_jobs`, `gitlab_get_job`, `gitlab_get_issue`, `jira_get_issue`, `jira_normalize_issue`, `jira_get_comments`, `jira_get_remote_issue_links`, `jira_search_jql`, `confluence_get_page` | `.json` file | the full payload as pretty UTF-8 JSON (plus `<name>.images/` for Jira images) |
+| `figma_fetch_screenshot`, `figma_get_screenshot` | `.png` file, or a directory (existing, or a path ending in `/` or `\`; required for several nodes) | decoded PNG bytes; `<node-id-dashed>.png` per node in a directory |
+
+With `save_to` the tool returns only `{saved_to, bytes, sha256, kind: "json"|"png", summary}` (`summary` holds a few key fields such as MR iid/state/sha/web_url, issue key/status, or Figma name/lastModified/node ids). Image tools return no image content. Without `save_to` nothing changes. `jira_normalize_issue` and `jira_get_comments` also save their embedded images next to the JSON as `<name>.images/<n>.<ext>` and list them in `summary.images`. `figma_get_screenshot` with `save_to` downloads the render (PNG only).
+
+Safety (this turns a read tool into a file writer):
+
+- The path must be absolute and inside the allowed roots. The default root is **`<os tmpdir>/dev.mcp` only** (created `0700`); it is no longer the home directory.
+- Existing files are **not** overwritten unless the call passes `overwrite: true`. Overwrite, path, roots, and extension are all checked before any network call.
+- Any dot-prefixed path segment (`.ssh`, `.claude`, `.claude.json`, `.git`, `.vscode`, `.config`, `.aws`, `.gnupg`, `.npmrc`, `.env*`, ...) is refused, even inside an allowed root, except the names in `DEV_MCP_SAVE_ALLOW_DOT` (default `.factory`, so `~/.factory/runs` works when it is a configured root).
+- No `..` escape, no symlink/junction escape (the real path of the nearest existing parent must stay inside a root, re-checked right before the write), extension must match (`.json`/`.png`), no `:` after the drive letter (NTFS alternate streams), and no segment ending in a dot or space.
+- Directories are created `0700` and files `0600` on POSIX; temp files are opened exclusively and the final step is an atomic rename. The spill folder is per user (`dev.mcp-spill-<uid>`) and refused if it is a symlink or owned by someone else.
+- Several nodes whose ids map to the same file name (`1:2` and `1-2`) are an error. Failures come back as tool errors and nothing is partially written.
+
+| Variable | Meaning |
+| -------- | ------- |
+| `DEV_MCP_SAVE_ROOTS` | Allowed roots, separated by the OS path delimiter (`;` on Windows, `:` elsewhere). Default when unset: `<os tmpdir>/dev.mcp`. |
+| `DEV_MCP_SAVE_ALLOW_DOT` | Dot-prefixed path segments that stay allowed, comma-separated. Default: `.factory`. |
+| `DEV_MCP_SPILL_KB` | Optional auto-spill. Integer; unset or `0` disables it. When set and a supported tool is called **without** `save_to` and its payload exceeds this many KB (images: decoded bytes), the payload is saved to `<spill dir>/<tool>-<timestamp>-<shorthash>.<json\|png>` and the tool returns the compact summary plus `spilled: true` and a hint with the path. |
+| `DEV_MCP_SPILL_DIR` | Spill folder override (must also be inside the allowed roots). Default: `dev.mcp-spill-<uid>` under the default root (or the first allowed root). |
 
 ## Tokens
 
@@ -295,7 +324,7 @@ npm run build
 npm run dev    # stdio; only useful behind an MCP client
 ```
 
-Tests (Vitest): Retry-After on 429, Figma cache/dedup, no cache on GitLab POST, `403 → glab` fallback.
+Tests (Vitest): Retry-After on 429, Figma cache/dedup, no cache on GitLab POST, `403 → glab` fallback, `save_to` and auto-spill (roots, traversal, extension, atomic write).
 
 Rules so other clients keep working:
 

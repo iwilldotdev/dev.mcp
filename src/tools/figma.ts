@@ -13,7 +13,52 @@ import {
   type FigmaNode,
 } from "../figma/parse.js";
 import type { Runtime } from "../runtime.js";
-import { rawResult, wrapTool } from "./result.js";
+import { rawResult, saveToImageShape, saveToShape, wrapSaveTool, wrapTool } from "./result.js";
+import { precheckSave, savePngs, spillBytes, spillFile, spillHint } from "../save.js";
+import { sumFigmaContext, sumFigmaFile, sumFigmaFrames, sumFigmaMeta, sumFigmaVars } from "./summaries.js";
+
+async function downloadPngs(
+  figma: FigmaClient,
+  rendered: { images?: Record<string, string | null> },
+  ids: string[],
+): Promise<Array<{ nodeId: string; data: Buffer; width?: number; height?: number }>> {
+  const out = [];
+  for (const id of ids) {
+    const url = rendered.images?.[id] ?? rendered.images?.[id.replaceAll(":", "-")];
+    if (!url) throw new Error(`No render URL for node ${id}; nothing was saved.`);
+    const image = await figma.fetchImage(url);
+    if (image.mime !== "image/png") throw new Error(`Node ${id} did not render as PNG (${image.mime}); nothing was saved.`);
+    out.push({ nodeId: id, data: image.data, width: image.width, height: image.height });
+  }
+  return out;
+}
+
+async function saveImageSummary(
+  saveTo: string,
+  images: Array<{ nodeId: string; data: Buffer; width?: number; height?: number }>,
+  extra: Record<string, unknown>,
+  overwrite?: boolean,
+) {
+  const saved = await savePngs(saveTo, images, { overwrite });
+  const first = saved[0]!;
+  return {
+    saved_to: saved.length === 1 ? first.saved_to : saveTo,
+    bytes: saved.reduce((n, x) => n + x.bytes, 0),
+    sha256: first.sha256,
+    kind: "png",
+    summary: {
+      ...extra,
+      images: saved.map((x, i) => ({
+        nodeId: images[i]!.nodeId,
+        saved_to: x.saved_to,
+        bytes: x.bytes,
+        sha256: x.sha256,
+        width: images[i]!.width,
+        height: images[i]!.height,
+      })),
+    },
+  };
+}
 
 function client(runtime: Runtime): FigmaClient {
   return new FigmaClient(requireFigma(runtime.config), runtime.http, runtime.figmaCache);
@@ -43,8 +88,9 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
 
   server.tool(
     "figma_get_file",
-    "Gets the Figma document (GET /v1/files/:key). Use depth/ids to shrink the payload.",
+    "Gets the Figma document (GET /v1/files/:key). Use depth/ids to shrink the payload. To keep or hand off the payload, pass save_to (absolute path); the response becomes a compact summary.",
     {
+      ...saveToShape,
       ...fileKeyShape,
       depth: z.number().int().min(1).max(8).optional().describe("Tree depth."),
       ids: z
@@ -52,7 +98,7 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
         .optional()
         .describe("Node IDs (comma-separated or array). URL node-id (1-2) is accepted."),
     },
-    wrapTool(async (args) => {
+    wrapSaveTool("figma_get_file", sumFigmaFile, async (args) => {
       const fileKey = fileKeyFrom(args);
       const ids = parseFigmaNodeIds(args.ids);
       return client(runtime).getFile(fileKey, { depth: args.depth, ids });
@@ -61,8 +107,9 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
 
   server.tool(
     "figma_get_metadata",
-    "Slim XML tree (id, name, type, size) via GET /v1/files/:key/nodes.",
+    "Slim XML tree (id, name, type, size) via GET /v1/files/:key/nodes. To keep or hand off the payload, pass save_to (absolute path); the response becomes a compact summary.",
     {
+      ...saveToShape,
       ...fileKeyShape,
       nodeIds: z
         .union([z.string(), z.array(z.string())])
@@ -70,7 +117,7 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
         .describe("Nodes to include. If omitted, tries the URL node-id; otherwise uses the root document."),
       depth: z.number().int().min(1).max(8).optional(),
     },
-    wrapTool(async (args) => {
+    wrapSaveTool("figma_get_metadata", sumFigmaMeta, async (args) => {
       const figma = client(runtime);
       const parsed = args.url ? parseFigmaUrl(args.url) : { fileKey: fileKeyFrom(args) };
       const fileKey = args.fileKey ? parseFigmaFileKey(args.fileKey) : parsed.fileKey;
@@ -97,9 +144,10 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
 
   server.tool(
     "figma_get_screenshot",
-    "Renders nodes as images (GET /v1/images/:key) and returns temporary URLs.",
+    "Renders nodes as images (GET /v1/images/:key) and returns temporary URLs. With save_to, downloads the PNG bytes and writes them to disk (a .png file, or a directory for several nodes); the response becomes a compact summary with no image content.",
     {
       ...fileKeyShape,
+      ...saveToImageShape,
       nodeIds: z
         .union([z.string(), z.array(z.string())])
         .describe("Node IDs to render."),
@@ -107,25 +155,32 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
       scale: z.number().min(0.01).max(4).optional(),
     },
     wrapTool(async (args) => {
+      if (args.save_to && args.format && args.format !== "png") throw new Error("save_to supports format png only.");
       const fileKey = fileKeyFrom(args);
       const fromUrl = args.url ? parseFigmaUrl(args.url).nodeIds : undefined;
       const ids = parseFigmaNodeIds(args.nodeIds) ?? fromUrl;
       if (!ids?.length) throw new Error("Provide nodeIds (or a URL with node-id).");
-      return client(runtime).getImages(fileKey, ids, {
-        format: args.format,
+      if (args.save_to) await precheckSave(args.save_to, "png", { nodeIds: ids, overwrite: args.overwrite });
+      const figma = client(runtime);
+      const rendered = await figma.getImages(fileKey, ids, {
+        format: args.save_to ? "png" : args.format,
         scale: args.scale,
       });
+      if (!args.save_to) return rendered;
+      const downloaded = await downloadPngs(figma, rendered, ids);
+      return saveImageSummary(args.save_to, downloaded, { fileKey, scale: args.scale ?? 1 }, args.overwrite);
     }),
   );
 
   server.tool(
     "figma_get_variable_defs",
-    "Local (and optionally published) variables for the file (GET /v1/files/:key/variables/...).",
+    "Local (and optionally published) variables for the file (GET /v1/files/:key/variables/...). To keep or hand off the payload, pass save_to (absolute path); the response becomes a compact summary.",
     {
+      ...saveToShape,
       ...fileKeyShape,
       includePublished: z.boolean().optional().describe("Also fetch published variables."),
     },
-    wrapTool(async (args) => {
+    wrapSaveTool("figma_get_variable_defs", sumFigmaVars, async (args) => {
       const fileKey = fileKeyFrom(args);
       const figma = client(runtime);
       const local = summarizeVariables(await figma.getLocalVariables(fileKey));
@@ -137,8 +192,9 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
 
   server.tool(
     "figma_get_design_context",
-    "Implementation context (layout, fixed sizing, effects, text, hidden layers, masks, component variants, style names, hyperlink/prototype pointers, screenshot URL) composed via REST. Variables are off unless includeVariables is true; a variables failure is a warning and does not drop nodes or truncate the tree. A node id returns its subtree until depth or the node/byte cap cuts it; a cut sets truncated, truncation.hint and truncation.nextChildIds (refetch those ids). fields selects blocks (layout, visual, fills, strokes, text, component) to shrink the payload. The payload carries lastModified for pack freshness checks. A call without a node id is cut at file depth 3. Missing ids are listed in missingNodeIds. A screenshot failure is a warning and does not drop nodes. Rotation is passed through as REST returns it (unit not documented). Not the official MCP proprietary codegen.",
+    "Implementation context (layout, fixed sizing, effects, text, hidden layers, masks, component variants, style names, hyperlink/prototype pointers, screenshot URL) composed via REST. Variables are off unless includeVariables is true; a variables failure is a warning and does not drop nodes or truncate the tree. A node id returns its subtree until depth or the node/byte cap cuts it; a cut sets truncated, truncation.hint and truncation.nextChildIds (refetch those ids). fields selects blocks (layout, visual, fills, strokes, text, component) to shrink the payload. The payload carries lastModified for pack freshness checks. A call without a node id is cut at file depth 3. Missing ids are listed in missingNodeIds. A screenshot failure is a warning and does not drop nodes. Rotation is passed through as REST returns it (unit not documented). Not the official MCP proprietary codegen. To keep or hand off the payload, pass save_to (absolute path); the response becomes a compact summary.",
     {
+      ...saveToShape,
       ...fileKeyShape,
       nodeIds: z
         .union([z.string(), z.array(z.string())])
@@ -169,7 +225,7 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
         .describe("Screenshot scale. Default 1, so pixels match CSS pixels."),
       screenshotFormat: z.enum(["png", "jpg", "svg", "pdf"]).optional().describe("Default: png."),
     },
-    wrapTool(async (args) => {
+    wrapSaveTool("figma_get_design_context", sumFigmaContext, async (args) => {
       const parsed = args.url ? parseFigmaUrl(args.url) : { fileKey: fileKeyFrom(args) };
       const fileKey = args.fileKey ? parseFigmaFileKey(args.fileKey) : parsed.fileKey;
       const nodeIds = parseFigmaNodeIds(args.nodeIds) ?? parsed.nodeIds;
@@ -192,24 +248,32 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
 
   server.tool(
     "figma_fetch_screenshot",
-    "Downloads rendered node images and returns image bytes plus sha256, MIME, and dimensions. Does not rely on a temporary Figma URL remaining valid. Canonical scale is 1.",
+    "Downloads rendered node images and returns image bytes plus sha256, MIME, and dimensions. Does not rely on a temporary Figma URL remaining valid. Canonical scale is 1. With save_to, writes the PNG bytes to disk (a .png file, or a directory for several nodes) and returns only a compact summary with no image content; with DEV_MCP_SPILL_KB set, oversized images are spilled to disk the same way.",
     {
       ...fileKeyShape,
+      ...saveToImageShape,
       nodeIds: z.union([z.string(), z.array(z.string())]).describe("Node IDs to render."),
       format: z.enum(["png", "jpg", "svg", "pdf"]).optional(),
       scale: z.number().min(0.01).max(4).optional().describe("Default: 1."),
     },
     wrapTool(async (args) => {
+      if (args.save_to && args.format && args.format !== "png") throw new Error("save_to supports format png only.");
       const fileKey = fileKeyFrom(args);
       const fromUrl = args.url ? parseFigmaUrl(args.url).nodeIds : undefined;
       const ids = parseFigmaNodeIds(args.nodeIds) ?? fromUrl;
       if (!ids?.length) throw new Error("Provide nodeIds (or a URL with node-id).");
+      if (args.save_to) await precheckSave(args.save_to, "png", { nodeIds: ids, overwrite: args.overwrite });
       const figma = client(runtime);
       const rendered = await figma.getImages(fileKey, ids, {
         format: args.format ?? "png",
         scale: args.scale ?? 1,
       });
+      if (args.save_to) {
+        const downloaded = await downloadPngs(figma, rendered, ids);
+        return saveImageSummary(args.save_to, downloaded, { fileKey, scale: args.scale ?? 1 }, args.overwrite);
+      }
       const images = [];
+      const pngBuffers: Array<{ nodeId: string; data: Buffer }> = [];
       const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];
       for (const id of ids) {
         const url = rendered.images?.[id] ?? rendered.images?.[id.replaceAll(":", "-")];
@@ -227,8 +291,25 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
           byteLength: image.byteLength,
         });
         if (image.mime.startsWith("image/")) {
+          if (image.mime === "image/png") pngBuffers.push({ nodeId: id, data: image.data });
           content.push({ type: "image", data: image.data.toString("base64"), mimeType: image.mime });
         }
+      }
+      const limit = spillBytes();
+      const totalBytes = pngBuffers.reduce((n, i) => n + i.data.length, 0);
+      if (limit > 0 && pngBuffers.length && totalBytes > limit) {
+        const spilled = [];
+        for (const img of pngBuffers) {
+          const file = await spillFile("figma_fetch_screenshot", img.data, "png");
+          const [r] = await savePngs(file, [img]);
+          spilled.push({ nodeId: img.nodeId, ...r! });
+        }
+        return {
+          ...spilled[0]!,
+          summary: { fileKey, scale: args.scale ?? 1, images, files: spilled.map((x) => ({ nodeId: x.nodeId, saved_to: x.saved_to, bytes: x.bytes, sha256: x.sha256 })) },
+          spilled: true,
+          hint: spillHint(spilled.map((x) => x.saved_to).join(", ")),
+        };
       }
       content.unshift({
         type: "text",
@@ -240,9 +321,9 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
 
   server.tool(
     "figma_get_file_meta",
-    "Cheap freshness check: file name and lastModified (GET /v1/files/:key at depth 1). Use it to decide whether a persisted Figma pack is stale before refetching node contexts.",
-    fileKeyShape,
-    wrapTool(async (args) => {
+    "Cheap freshness check: file name and lastModified (GET /v1/files/:key at depth 1). Use it to decide whether a persisted Figma pack is stale before refetching node contexts. To keep or hand off the payload, pass save_to (absolute path); the response becomes a compact summary.",
+    { ...fileKeyShape, ...saveToShape },
+    wrapSaveTool("figma_get_file_meta", sumFigmaMeta, async (args) => {
       const fileKey = fileKeyFrom(args);
       const file = await client(runtime).getFile(fileKey, { depth: 1 });
       return {
@@ -256,13 +337,14 @@ export function registerFigmaTools(server: McpServer, runtime: Runtime): void {
 
   server.tool(
     "figma_get_frames",
-    "Recursive frame index (GET /v1/files/:key): id, name, type, size, pagePath, and sectionPath, including frames nested in sections. One REST call; pageName filters pages.",
+    "Recursive frame index (GET /v1/files/:key): id, name, type, size, pagePath, and sectionPath, including frames nested in sections. One REST call; pageName filters pages. To keep or hand off the payload, pass save_to (absolute path); the response becomes a compact summary.",
     {
+      ...saveToShape,
       ...fileKeyShape,
       pageName: z.string().optional().describe("Case-insensitive substring filter on the page name."),
       depth: z.number().int().min(1).max(8).optional().describe("Document depth. Default: 4."),
     },
-    wrapTool(async (args) => {
+    wrapSaveTool("figma_get_frames", sumFigmaFrames, async (args) => {
       const fileKey = fileKeyFrom(args);
       const file = await client(runtime).getFile(fileKey, { depth: args.depth ?? 4 });
       const indexed = collectFrames(file.document as FigmaNode | undefined, {

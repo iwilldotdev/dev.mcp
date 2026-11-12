@@ -3,7 +3,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ConfluenceClient } from "../clients/confluence.js";
 import { requireAtlassian } from "../config.js";
 import type { Runtime } from "../runtime.js";
-import { wrapTool } from "./result.js";
+import { saveToShape, wrapSaveTool, wrapTool } from "./result.js";
+import { sumPage } from "./summaries.js";
 
 function client(runtime: Runtime): ConfluenceClient {
   return new ConfluenceClient(requireAtlassian(runtime.config), runtime.http);
@@ -47,15 +48,16 @@ export function registerConfluenceTools(server: McpServer, runtime: Runtime): vo
 
   server.tool(
     "confluence_get_page",
-    "Gets a page (GET /wiki/api/v2/pages/{id}).",
+    "Gets a page (GET /wiki/api/v2/pages/{id}). To keep or hand off the payload, pass save_to (absolute path); the response becomes a compact summary.",
     {
+      ...saveToShape,
       pageId,
       bodyFormat: z
         .string()
         .optional()
         .describe("storage (default), atlas_doc_format, view."),
     },
-    wrapTool(async (args) => client(runtime).getPage(args.pageId, { bodyFormat: args.bodyFormat })),
+    wrapSaveTool("confluence_get_page", sumPage, async (args) => client(runtime).getPage(args.pageId, { bodyFormat: args.bodyFormat })),
   );
 
   server.tool(

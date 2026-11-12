@@ -5,7 +5,8 @@ import { readRichIssue } from "../jira/rich-issue.js";
 import { JiraClient } from "../clients/jira.js";
 import { requireAtlassian } from "../config.js";
 import type { Runtime } from "../runtime.js";
-import { wrapTool } from "./result.js";
+import { saveToShape, wrapSaveTool, wrapTool } from "./result.js";
+import { sumJiraIssue, sumJiraRich, sumJql, sumLinks } from "./summaries.js";
 
 function client(runtime: Runtime): JiraClient {
   return new JiraClient(requireAtlassian(runtime.config), runtime.http);
@@ -14,46 +15,50 @@ function client(runtime: Runtime): JiraClient {
 export function registerJiraTools(server: McpServer, runtime: Runtime): void {
   server.tool(
     "jira_get_issue",
-    "Gets a Jira issue (GET /rest/api/3/issue/{key}).",
+    "Gets a Jira issue (GET /rest/api/3/issue/{key}). To keep or hand off the payload, pass save_to (absolute path); the response becomes a compact summary.",
     {
+      ...saveToShape,
       issueIdOrKey: z.string().describe("Key or ID, e.g. ABC-123."),
       fields: z.string().optional().describe("CSV fields, e.g. summary,status,assignee."),
       expand: z.string().optional(),
     },
-    wrapTool(async (args) =>
+    wrapSaveTool("jira_get_issue", sumJiraIssue, async (args) =>
       client(runtime).getIssue(args.issueIdOrKey, { fields: args.fields, expand: args.expand }),
     ),
   );
 
   server.tool(
     "jira_normalize_issue",
-    "Reads an issue, its comment thread, remote links, and image bytes from the description, comments, and image attachments. Returns schemaVersion 1 text, acceptance criteria, links, and explicit unknowns. ADF stays data; it is not executed.",
+    "Reads an issue, its comment thread, remote links, and image bytes from the description, comments, and image attachments. Returns schemaVersion 1 text, acceptance criteria, links, and explicit unknowns. ADF stays data; it is not executed. To keep or hand off the payload, pass save_to (absolute path); the response becomes a compact summary.",
     {
+      ...saveToShape,
       issueIdOrKey: z.string().describe("Key or ID, e.g. ABC-123."),
     },
-    wrapTool(async (args) => readRichIssue(client(runtime), args.issueIdOrKey)),
+    wrapSaveTool("jira_normalize_issue", sumJiraRich, async (args) => readRichIssue(client(runtime), args.issueIdOrKey)),
   );
 
   server.tool(
     "jira_get_comments",
-    "Reads the comment thread of an issue, including author, text, links, and the images embedded in those comments and in the description.",
+    "Reads the comment thread of an issue, including author, text, links, and the images embedded in those comments and in the description. To keep or hand off the payload, pass save_to (absolute path); the response becomes a compact summary.",
     {
+      ...saveToShape,
       issueIdOrKey: z.string().describe("Key or ID, e.g. ABC-123."),
     },
-    wrapTool(async (args) => readRichIssue(client(runtime), args.issueIdOrKey)),
+    wrapSaveTool("jira_get_comments", sumJiraRich, async (args) => readRichIssue(client(runtime), args.issueIdOrKey)),
   );
 
   server.tool(
     "jira_search_jql",
-    "Search issues with JQL (POST /rest/api/3/search/jql).",
+    "Search issues with JQL (POST /rest/api/3/search/jql). To keep or hand off the payload, pass save_to (absolute path); the response becomes a compact summary.",
     {
+      ...saveToShape,
       jql: z.string(),
       maxResults: z.number().int().min(1).max(100).optional(),
       nextPageToken: z.string().optional(),
       fields: z.array(z.string()).optional(),
       expand: z.string().optional(),
     },
-    wrapTool(async (args) => client(runtime).searchJql(args)),
+    wrapSaveTool("jira_search_jql", sumJql, async (args) => client(runtime).searchJql(args)),
   );
 
   server.tool(
@@ -195,9 +200,9 @@ export function registerJiraTools(server: McpServer, runtime: Runtime): void {
 
   server.tool(
     "jira_get_remote_issue_links",
-    "Remote links on an issue (GET /rest/api/3/issue/{key}/remotelink).",
-    { issueIdOrKey: z.string() },
-    wrapTool(async (args) => client(runtime).getRemoteIssueLinks(args.issueIdOrKey)),
+    "Remote links on an issue (GET /rest/api/3/issue/{key}/remotelink). To keep or hand off the payload, pass save_to (absolute path); the response becomes a compact summary.",
+    { issueIdOrKey: z.string(), ...saveToShape },
+    wrapSaveTool("jira_get_remote_issue_links", sumLinks, async (args) => client(runtime).getRemoteIssueLinks(args.issueIdOrKey)),
   );
 
   server.tool(

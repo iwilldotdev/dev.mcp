@@ -2,7 +2,8 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { GitLabClient, encodeProjectId } from "../clients/gitlab.js";
 import type { Runtime } from "../runtime.js";
-import { wrapTool } from "./result.js";
+import { saveToShape, wrapSaveTool, wrapTool } from "./result.js";
+import { sumIssue, sumJob, sumJobs, sumMr, sumMrList, sumPipeline } from "./summaries.js";
 
 const projectId = z
   .string()
@@ -70,12 +71,13 @@ export function registerGitLabTools(
 
   server.tool(
     "gitlab_get_issue",
-    "Gets an issue (GET /projects/:id/issues/:iid).",
+    "Gets an issue (GET /projects/:id/issues/:iid). To keep or hand off the payload, pass save_to (absolute path); the response becomes a compact summary.",
     {
+      ...saveToShape,
       projectId,
       issueIid: z.number().int().positive(),
     },
-    wrapTool(async (args) =>
+    wrapSaveTool("gitlab_get_issue", sumIssue, async (args) =>
       gitlab.request(`projects/${p(args.projectId)}/issues/${args.issueIid}`),
     ),
   );
@@ -105,8 +107,9 @@ export function registerGitLabTools(
 
   server.tool(
     "gitlab_list_merge_requests",
-    "Lists merge requests (GET /projects/:id/merge_requests).",
+    "Lists merge requests (GET /projects/:id/merge_requests). To keep or hand off the payload, pass save_to (absolute path); the response becomes a compact summary.",
     {
+      ...saveToShape,
       projectId,
       state: z.enum(["opened", "closed", "locked", "merged", "all"]).optional(),
       sourceBranch: z.string().optional(),
@@ -115,7 +118,7 @@ export function registerGitLabTools(
       perPage: z.number().int().min(1).max(100).optional(),
       page: z.number().int().min(1).optional(),
     },
-    wrapTool(async (args) =>
+    wrapSaveTool("gitlab_list_merge_requests", sumMrList, async (args) =>
       gitlab.request(`projects/${p(args.projectId)}/merge_requests`, {
         query: {
           state: args.state,
@@ -131,8 +134,9 @@ export function registerGitLabTools(
 
   server.tool(
     "gitlab_get_merge_request",
-    "Gets an MR and optionally commits, diffs, notes, and pipelines.",
+    "Gets an MR and optionally commits, diffs, notes, and pipelines. To keep or hand off the payload, pass save_to (absolute path); the response becomes a compact summary.",
     {
+      ...saveToShape,
       projectId,
       mergeRequestIid: z.number().int().positive(),
       includeCommits: z.boolean().optional(),
@@ -140,7 +144,7 @@ export function registerGitLabTools(
       includeNotes: z.boolean().optional(),
       includePipelines: z.boolean().optional(),
     },
-    wrapTool(async (args) => {
+    wrapSaveTool("gitlab_get_merge_request", sumMr, async (args) => {
       const base = `projects/${p(args.projectId)}/merge_requests/${args.mergeRequestIid}`;
       const mr = await gitlab.request(base);
       const extra: Record<string, unknown> = { merge_request: mr };
@@ -366,36 +370,39 @@ export function registerGitLabTools(
 
   server.tool(
     "gitlab_get_pipeline",
-    "Gets a pipeline (GET /pipelines/:pipeline_id).",
+    "Gets a pipeline (GET /pipelines/:pipeline_id). To keep or hand off the payload, pass save_to (absolute path); the response becomes a compact summary.",
     {
+      ...saveToShape,
       projectId,
       pipelineId: z.number().int().positive(),
     },
-    wrapTool(async (args) =>
+    wrapSaveTool("gitlab_get_pipeline", sumPipeline, async (args) =>
       gitlab.request(`projects/${p(args.projectId)}/pipelines/${args.pipelineId}`),
     ),
   );
 
   server.tool(
     "gitlab_get_pipeline_jobs",
-    "Jobs of a pipeline (GET /pipelines/:pipeline_id/jobs).",
+    "Jobs of a pipeline (GET /pipelines/:pipeline_id/jobs). To keep or hand off the payload, pass save_to (absolute path); the response becomes a compact summary.",
     {
+      ...saveToShape,
       projectId,
       pipelineId: z.number().int().positive(),
     },
-    wrapTool(async (args) =>
+    wrapSaveTool("gitlab_get_pipeline_jobs", sumJobs, async (args) =>
       gitlab.request(`projects/${p(args.projectId)}/pipelines/${args.pipelineId}/jobs`),
     ),
   );
 
   server.tool(
     "gitlab_get_job",
-    "Gets a job (GET /projects/:id/jobs/:job_id).",
+    "Gets a job (GET /projects/:id/jobs/:job_id). To keep or hand off the payload, pass save_to (absolute path); the response becomes a compact summary.",
     {
+      ...saveToShape,
       projectId,
       jobId: z.number().int().positive(),
     },
-    wrapTool(async (args) => gitlab.request(`projects/${p(args.projectId)}/jobs/${args.jobId}`)),
+    wrapSaveTool("gitlab_get_job", sumJob, async (args) => gitlab.request(`projects/${p(args.projectId)}/jobs/${args.jobId}`)),
   );
 
   server.tool(
