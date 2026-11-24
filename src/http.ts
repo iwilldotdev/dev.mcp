@@ -21,6 +21,7 @@ export type HttpClientOptions = {
 };
 
 const DEFAULT_RETRY_ON = [429, 503];
+const WRITE_RETRY_ON = [429];
 
 export function parseRetryAfter(
   header: string | null,
@@ -95,7 +96,12 @@ export class HttpClient {
   }> {
     const timeoutMs = init.timeoutMs ?? this.timeoutMs;
     const maxRetries = init.maxRetries ?? this.maxRetries;
-    const retryOn = init.retryOn ?? DEFAULT_RETRY_ON;
+    // Non-idempotent writes are retried only on 429 (the request was rejected, not processed),
+    // never on 503 or after a network error, unless the caller sets retryOn explicitly.
+    const method = (init.method ?? "GET").toUpperCase();
+    const idempotent = method === "GET" || method === "HEAD" || method === "OPTIONS";
+    const retryOn = init.retryOn ?? (idempotent ? DEFAULT_RETRY_ON : WRITE_RETRY_ON);
+    const retryNetwork = idempotent || init.retryOn !== undefined;
     let lastError: unknown;
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
@@ -141,7 +147,7 @@ export class HttpClient {
         if (err instanceof Error && err.name === "AbortError") {
           throw new Error(`Timeout of ${timeoutMs}ms for ${url}`);
         }
-        if (attempt < maxRetries) {
+        if (retryNetwork && attempt < maxRetries) {
           await this.sleep(backoffMs(attempt));
           continue;
         }
@@ -162,6 +168,10 @@ export class HttpClient {
     return body as T;
   }
 
+  download(url: string, opts: DownloadOptions) {
+    return downloadBytes(this.fetchImpl, url, { timeoutMs: this.timeoutMs, ...opts });
+  }
+
   async bytes(url: string, init: HttpRequestInit = {}): Promise<{ mime: string; data: Buffer }> {
     const { headers, body } = await this.request(url, { ...init, raw: true });
     return {
@@ -169,6 +179,89 @@ export class HttpClient {
       data: Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? "")),
     };
   }
+}
+
+export type DownloadOptions = {
+  headers?: Record<string, string>;
+  /** Credentials (Authorization/Cookie) are sent only to this origin, also across redirects. */
+  authOrigin?: string;
+  maxBytes: number;
+  maxRedirects?: number;
+  timeoutMs?: number;
+};
+
+async function readCapped(res: Response, maxBytes: number, url: string): Promise<Buffer> {
+  const tooBig = () => new Error(`Download from ${url} exceeds the ${maxBytes}-byte limit (DEV_MCP_SAVE_MAX_MB); nothing was saved.`);
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await res.body?.cancel().catch(() => undefined);
+    throw tooBig();
+  }
+  if (!res.body) return Buffer.from(await res.arrayBuffer());
+  const chunks: Buffer[] = [];
+  let total = 0;
+  const reader = res.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw tooBig();
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks, total);
+}
+
+/**
+ * HttpClient.download: GET with manual redirect handling, a byte cap, and no credential
+ * forwarding to any origin other than `authOrigin` (checked on every hop).
+ */
+export async function downloadBytes(
+  fetchImpl: FetchLike,
+  startUrl: string,
+  opts: DownloadOptions,
+): Promise<{ mime: string; data: Buffer; headers: Headers; finalUrl: string }> {
+  const maxRedirects = opts.maxRedirects ?? 5;
+  let url = startUrl;
+  for (let hop = 0; hop <= maxRedirects; hop += 1) {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error(`Unsupported URL scheme: ${parsed.protocol}`);
+    const headers: Record<string, string> = {};
+    for (const [k, v] of Object.entries(opts.headers ?? {})) {
+      // Off the auth origin only an allowlist of harmless headers is forwarded.
+      if (parsed.origin !== opts.authOrigin && !/^(accept|user-agent)$/i.test(k)) continue;
+      headers[k] = v;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 30_000);
+    try {
+      const res = await fetchImpl(url, { method: "GET", headers, redirect: "manual", signal: controller.signal });
+      if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
+        await res.body?.cancel().catch(() => undefined);
+        url = new URL(res.headers.get("location")!, url).toString();
+        continue;
+      }
+      if (!res.ok) {
+        const text = (await res.text().catch(() => "")).slice(0, 500);
+        throw new ApiError(formatErrorMessage(res.status, url, text), res.status, url, text);
+      }
+      const data = await readCapped(res, opts.maxBytes, url);
+      return {
+        mime: res.headers.get("content-type")?.split(";")[0]?.trim() || "application/octet-stream",
+        data,
+        headers: res.headers,
+        finalUrl: url,
+      };
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") throw new Error(`Timeout for ${url}`);
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new Error(`Too many redirects (>${maxRedirects}) from ${startUrl}`);
 }
 
 export function basicAuth(user: string, password: string): string {

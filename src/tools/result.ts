@@ -71,7 +71,7 @@ export const saveToImageShape = {
     .string()
     .optional()
     .describe(
-      "Absolute path for PNG bytes: a .png file, or a directory / path ending in / or \ (required for several nodes) that gets <node-id-dashed>.png per node. Returns only {saved_to, bytes, sha256, kind, summary}, no image content. Must be inside DEV_MCP_SAVE_ROOTS (default: <os tmpdir>/dev.mcp); dot-folders such as .ssh or .claude are refused.",
+      "Absolute path for image bytes: a file whose extension matches the image format (.png by default; .jpg, .svg or .pdf when the tool takes that format), or a directory / path ending in / or \ (required for several nodes) that gets <node-id-dashed>.<ext> per node (same format rule). Returns only {saved_to, bytes, sha256, kind, summary}, no image content. Must be inside DEV_MCP_SAVE_ROOTS (default: <os tmpdir>/dev.mcp); dot-folders such as .ssh or .claude are refused.",
     ),
   overwrite: overwriteShape,
 };
@@ -142,3 +142,13 @@ export function wrapSaveTool<T extends { save_to?: string; overwrite?: boolean }
       : { ...saved, summary, spilled: true, hint: spillHint(saved.saved_to) };
   });
 }
+
+export const saveToFileShape = {
+  save_to: z
+    .string()
+    .optional()
+    .describe(
+      "Absolute path: a file (allow-listed extension: png jpg jpeg gif webp svg pdf zip txt csv json md docx xlsx pptx) or a directory (existing, or ending in / or \) that gets the server-provided file name, sanitised. Writes the downloaded bytes and returns only {saved_to, bytes, sha256, kind, summary}. Must be inside DEV_MCP_SAVE_ROOTS (default: <os tmpdir>/dev.mcp); max size DEV_MCP_SAVE_MAX_MB (default 100). Without it, returns metadata and the download URL.",
+    ),
+  overwrite: overwriteShape,
+};
