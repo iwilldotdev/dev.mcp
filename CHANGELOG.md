@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **GitLab:** `gitlab_save_merge_request` `draft` now works. The REST API has no draft attribute and silently dropped it, so a "draft" MR was created ready for review; the tool now sets or removes the `Draft:` title marker (on an update with `draft` alone it reads the current title first).
+
 ## 1.3.0 — 2026-11-23
 
 Parity with the official MCP servers (GitLab, Atlassian Rovo, Figma): the goal is that dev.mcp can replace them in daily work. See [`docs/official-parity.md`](docs/official-parity.md). The server goes from 60 to 113 tools; 24 pre-parity names stay as deprecated aliases (137 registered with DEV_MCP_PARITY_WRITES=1, 118 by default).

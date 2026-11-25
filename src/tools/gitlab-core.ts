@@ -613,15 +613,20 @@ export function registerGitLabCore(c: Ctx): void {
     },
   );
 
-  const mrBody = (a: A) => ({
+  // The REST API has no draft attribute on create or update: GitLab reads the draft state from a title marker.
+  const DRAFT_MARK = /^\s*(?:\[draft\]|\(draft\)|draft:|draft\s+-|\[wip\]|wip:)\s*/i;
+  const withDraft = (title: string, draft: boolean) => {
+    const bare = title.replace(DRAFT_MARK, "");
+    return draft ? `Draft: ${bare}` : bare;
+  };
+  const mrBody = (a: A, title = a.title) => ({
     source_branch: a.source_branch,
     target_branch: a.target_branch,
-    title: a.title,
+    title,
     description: a.description,
     assignee_ids: a.assignee_ids,
     reviewer_ids: a.reviewer_ids,
     remove_source_branch: a.remove_source_branch,
-    draft: a.draft,
   });
   writeTool(
     c,
@@ -641,12 +646,20 @@ export function registerGitLabCore(c: Ctx): void {
     }),
     async (a) => {
       if (a.merge_request_iid) {
-        return gl.request(`projects/${proj(a)}/merge_requests/${a.merge_request_iid}`, { method: "PUT", body: mrBody(a) });
+        const path = `projects/${proj(a)}/merge_requests/${a.merge_request_iid}`;
+        let title = a.title;
+        if (a.draft !== undefined) {
+          // draft alone keeps the current title and only moves its marker
+          const current = title ?? (await gl.request<{ title: string }>(path)).title;
+          title = withDraft(current, a.draft);
+        }
+        return gl.request(path, { method: "PUT", body: mrBody(a, title) });
       }
       if (!a.source_branch || !a.target_branch || !a.title) {
         throw new Error("To create an MR, provide sourceBranch, targetBranch, and title.");
       }
-      return gl.request(`projects/${proj(a)}/merge_requests`, { method: "POST", body: mrBody(a) });
+      const title = a.draft === undefined ? a.title : withDraft(a.title, a.draft);
+      return gl.request(`projects/${proj(a)}/merge_requests`, { method: "POST", body: mrBody(a, title) });
     },
   );
 

@@ -173,6 +173,17 @@ describe("gitlab parity: request shapes", () => {
     if (body) expect(c.body).toMatchObject(body as object);
   });
 
+  it("save_merge_request sets draft through the title marker, which is all the REST API reads", async () => {
+    const { calls, call } = await setup({}, (m, pt) => (m === "GET" && pt.endsWith("/merge_requests/7") ? { title: "Draft: T" } : {}));
+    await call("gitlab_save_merge_request", { project_id: "g/p", source_branch: "f", target_branch: "main", title: "T", draft: true });
+    expect(last(calls).body).toEqual(expect.objectContaining({ title: "Draft: T" }));
+    expect(last(calls).body).not.toHaveProperty("draft");
+    await call("gitlab_save_merge_request", { project_id: "g/p", merge_request_iid: 7, draft: false });
+    expect(last(calls)).toMatchObject({ method: "PUT", body: { title: "T" } });
+    await call("gitlab_save_merge_request", { project_id: "g/p", merge_request_iid: 7, title: "[Draft] N", draft: true });
+    expect(last(calls).body).toMatchObject({ title: "Draft: N" });
+  });
+
   it("looks up a user by username, and events fall back to that user", async () => {
     const { calls, call } = await setup({}, (_m, pt) => (pt === "users" ? [{ id: 42, username: "bob" }] : undefined));
     const { json } = await call("gitlab_get_user", { username: "bob" });
