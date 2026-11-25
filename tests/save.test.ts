@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { chmod, lstat } from "node:fs/promises";
-import { allowedRoots, defaultRoot, precheckSave, resolveSavePath, saveJson, saveJsonWithImages, savePngs, spillBytes, spillDir } from "../src/save.js";
+import { BYTES_EXTENSIONS, allowedRoots, defaultRoot, maxSaveBytes, precheckBytes, precheckSave, resolveSavePath, sanitizeFileName, saveBytes, saveJson, saveJsonWithImages, savePngs, spillBytes, spillDir } from "../src/save.js";
 
 let root: string;
 let outside: string;
@@ -194,5 +194,122 @@ describe("hardening", () => {
     const dir = await spillDir({ DEV_MCP_SAVE_ROOTS: root });
     expect(path.basename(dir)).toMatch(/^dev\.mcp-spill-/);
     expect(path.dirname(dir)).toBe(root);
+  });
+});
+
+describe("sanitizeFileName", () => {
+  it("keeps only the last segment and neutralises traversal", () => {
+    expect(sanitizeFileName("..\\evil.txt")).toBe("evil.txt");
+    expect(sanitizeFileName("../../etc/passwd.txt")).toBe("passwd.txt");
+    expect(sanitizeFileName("C:\\dir\\x.png")).toBe("x.png");
+  });
+  it("replaces ':' (NTFS streams), drops leading dots and trailing dots/spaces", () => {
+    expect(sanitizeFileName("a:b.txt")).toBe("a_b.txt");
+    expect(sanitizeFileName("a.txt:stream")).toBe("a.txt_stream");
+    expect(sanitizeFileName(".env")).toBe("env");
+    expect(sanitizeFileName("..hidden.txt")).toBe("hidden.txt");
+    expect(sanitizeFileName("report.pdf. ")).toBe("report.pdf");
+  });
+  it("rejects empty, dot-only and device names", () => {
+    expect(() => sanitizeFileName("")).toThrow();
+    expect(() => sanitizeFileName("..")).toThrow();
+    expect(() => sanitizeFileName("...  ")).toThrow();
+    expect(() => sanitizeFileName("NUL.txt")).toThrow(/Reserved/);
+  });
+  it("caps the length and keeps the extension", () => {
+    const n = sanitizeFileName(`${"a".repeat(300)}.png`);
+    expect(n.length).toBeLessThanOrEqual(120);
+    expect(n.endsWith(".png")).toBe(true);
+  });
+});
+
+describe("saveBytes / precheckBytes", () => {
+  const data = Buffer.from("payload");
+
+  it("accepts every allow-listed extension and refuses others", async () => {
+    for (const ext of BYTES_EXTENSIONS) {
+      const r = await saveBytes(path.join(root, `f${ext}`), data, { env });
+      expect(r).toMatchObject({ kind: "file", bytes: 7, sha256: createHash("sha256").update(data).digest("hex") });
+      expect(r.saved_to).toBe(path.join(root, `f${ext}`));
+    }
+    for (const bad of ["a.exe", "a.sh", "a.bat", "a.html", "a", "a.PNG.exe"]) {
+      await expect(saveBytes(path.join(root, bad), data, { env })).rejects.toThrow(/not allowed/);
+    }
+    await saveBytes(path.join(root, "UPPER.PNG"), data, { env });
+  });
+
+  it("directory mode uses the sanitised server file name", async () => {
+    const r = await saveBytes(root + path.sep, data, { env, fileName: "..\\evil.txt" });
+    expect(r.saved_to).toBe(path.join(root, "evil.txt"));
+    expect((await readdir(root)).sort()).toEqual(["evil.txt"]);
+    await expect(saveBytes(root + path.sep, data, { env, fileName: ".env" })).rejects.toThrow(/not allowed/);
+    await expect(saveBytes(root + path.sep, data, { env, fileName: "run.exe" })).rejects.toThrow(/not allowed/);
+    await expect(saveBytes(root + path.sep, data, { env })).rejects.toThrow(/no file name/);
+    // an existing directory without a trailing separator is a directory too
+    const r2 = await saveBytes(root, data, { env, fileName: "b:c.txt." });
+    expect(r2.saved_to).toBe(path.join(root, "b_c.txt"));
+  });
+
+  it("precheckBytes validates the directory before the name is known", async () => {
+    expect(await precheckBytes(root + path.sep, { env })).toEqual({ dir: root });
+    await expect(precheckBytes(path.join(outside, "x") + path.sep, { env })).rejects.toThrow(/outside/);
+    await expect(precheckBytes("rel/x.txt", { env })).rejects.toThrow(/absolute/);
+    await expect(precheckBytes(path.join(root, ".ssh", "x.txt"), { env })).rejects.toThrow(/dot-prefixed/);
+    await expect(precheckBytes(path.join(root, "a:b.txt"), { env })).rejects.toThrow(/':'/);
+    await expect(precheckBytes(path.join(root, "a.txt."), { env })).rejects.toThrow(/dot or space/);
+  });
+
+  it("refuses a collision unless overwrite, leaving no temp files", async () => {
+    const f = path.join(root, "a.txt");
+    await saveBytes(f, Buffer.from("one"), { env });
+    await expect(saveBytes(f, Buffer.from("two"), { env })).rejects.toThrow(/already exists/);
+    expect((await readFile(f)).toString()).toBe("one");
+    await saveBytes(f, Buffer.from("two"), { env, overwrite: true });
+    expect((await readFile(f)).toString()).toBe("two");
+    expect((await readdir(root)).sort()).toEqual(["a.txt"]);
+    await expect(precheckBytes(root + path.sep, { env, fileName: "a.txt" })).rejects.toThrow(/already exists/);
+  });
+
+  it("enforces DEV_MCP_SAVE_MAX_MB (default 100)", async () => {
+    expect(maxSaveBytes({})).toBe(100 * 1024 * 1024);
+    expect(maxSaveBytes({ DEV_MCP_SAVE_MAX_MB: "bogus" })).toBe(100 * 1024 * 1024);
+    const small = { ...env, DEV_MCP_SAVE_MAX_MB: "0.00001" };
+    await expect(saveBytes(path.join(root, "big.txt"), Buffer.alloc(100), { env: small })).rejects.toThrow(/limit/);
+    expect(await readdir(root)).toEqual([]);
+  });
+
+  it("refuses roots escape and symlink/junction escape, and honours DEV_MCP_SAVE_ALLOW_DOT", async () => {
+    await expect(saveBytes(path.join(outside, "a.txt"), data, { env })).rejects.toThrow(/outside/);
+    await expect(saveBytes(path.join(root, "..", "a.txt"), data, { env })).rejects.toThrow(/outside/);
+    const link = path.join(root, "link");
+    let linked = true;
+    try {
+      await symlink(outside, link, "junction");
+    } catch {
+      linked = false; // symlinks unavailable on this machine
+    }
+    if (linked) {
+      await expect(saveBytes(path.join(link, "a.txt"), data, { env })).rejects.toThrow(/symlink|outside/);
+      await expect(saveBytes(link + path.sep, data, { env, fileName: "a.txt" })).rejects.toThrow(/symlink|outside/);
+      expect(await readdir(outside)).toEqual([]);
+    }
+    const dotted = path.join(root, ".factory", "a.txt");
+    await saveBytes(dotted, data, { env });
+    expect((await readFile(dotted)).toString()).toBe("payload");
+  });
+
+  it.skipIf(process.platform === "win32")("uses 0700 dirs and 0600 files", async () => {
+    const f = path.join(root, "sub", "a.txt");
+    await saveBytes(f, data, { env });
+    expect((await lstat(f)).mode & 0o777).toBe(0o600);
+    expect((await lstat(path.dirname(f))).mode & 0o777).toBe(0o700);
+  });
+
+  it("does not weaken the JSON path: json/png still require their own extension", async () => {
+    await expect(saveJson(path.join(root, "a.txt"), {}, { env })).rejects.toThrow(/\.json/);
+    await expect(savePngs(path.join(root, "a.jpg"), [{ nodeId: "1:2", data }], { env })).rejects.toThrow(/\.png/);
+    const [jpg] = await savePngs(path.join(root, "a.jpg"), [{ nodeId: "1:2", data }], { env, ext: "jpg" });
+    expect(jpg!.saved_to).toBe(path.join(root, "a.jpg"));
+    await expect(savePngs(path.join(root, "b.png"), [{ nodeId: "1:2", data }], { env, ext: "pdf" })).rejects.toThrow(/\.pdf/);
   });
 });

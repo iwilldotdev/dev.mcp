@@ -3,7 +3,8 @@ import { link, lstat, mkdir, realpath, rename, rm, stat, writeFile } from "node:
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-export type SaveKind = "json" | "png";
+export type SaveKind = "json" | "png" | "file";
+export type ImageExt = "png" | "jpg" | "svg" | "pdf";
 
 export type SaveResult = {
   saved_to: string;
@@ -21,7 +22,7 @@ export type ImageSaveResult = {
 
 type Opts = { env?: NodeJS.ProcessEnv; overwrite?: boolean };
 
-const EXT: Record<SaveKind, string> = { json: ".json", png: ".png" };
+const EXT = { json: ".json", png: ".png" } as const;
 const DEFAULT_ALLOW_DOT = ".factory";
 
 /** Default root: `<os tmpdir>/dev.mcp` only. DEV_MCP_SAVE_ROOTS overrides it. */
@@ -98,8 +99,12 @@ function checkRawPath(saveTo: string, env: NodeJS.ProcessEnv): void {
     if (!seg || seg === "." || seg === "..") continue;
     if (/[. ]$/.test(seg)) throw new Error(`save_to segment must not end in a dot or space: "${seg}"`);
   }
+  checkDotSegments(path.resolve(saveTo), env);
+}
+
+function checkDotSegments(absPath: string, env: NodeJS.ProcessEnv): void {
   const allow = allowedDotSegments(env);
-  for (const seg of path.resolve(saveTo).split(/[\\/]/)) {
+  for (const seg of absPath.split(/[\\/]/)) {
     if (seg.length > 1 && seg.startsWith(".") && seg !== ".." && !allow.includes(seg.toLowerCase())) {
       throw new Error(
         `save_to must not contain the dot-prefixed segment "${seg}" (config/secret folders are refused; allowlist: DEV_MCP_SAVE_ALLOW_DOT).`,
@@ -121,11 +126,20 @@ export async function resolveSavePath(saveTo: string, opts: Opts = {}): Promise<
       `save_to is outside the allowed roots (${roots.join(", ")}). Set DEV_MCP_SAVE_ROOTS to change them.`,
     );
   }
+  // '~' (8.3 short names such as PROGRA~1) is refused only below the matched root: the root
+  // itself may legitimately contain one (e.g. C:\Users\RUNNER~1\AppData\Local\Temp).
+  const matched = roots.filter((r) => inside(resolved, r)).sort((a, b) => b.length - a.length)[0]!;
+  for (const seg of path.relative(matched, resolved).split(/[\\/]/)) {
+    if (seg.includes("~")) {
+      throw new Error(`save_to segment must not contain '~' (8.3 short names can hide the real path): "${seg}"`);
+    }
+  }
   const real = await realOfNearestExisting(resolved);
   const rroots = await realRoots(roots);
   if (!rroots.some((r) => inside(real, r))) {
     throw new Error(`save_to resolves (symlink/junction) outside the allowed roots: ${real}`);
   }
+  checkDotSegments(real, env);
   return resolved;
 }
 
@@ -200,7 +214,11 @@ function describeFile(data: Buffer, file: string, kind: SaveKind): SaveResult {
   };
 }
 
-function checkExt(file: string, kind: SaveKind): void {
+function checkExt(file: string, kind: "json" | "png", ext?: ImageExt): void {
+  if (kind === "png" && ext) {
+    if (path.extname(file).toLowerCase() !== `.${ext}`) throw new Error(`save_to must end in .${ext} for this tool: ${file}`);
+    return;
+  }
   if (path.extname(file).toLowerCase() !== EXT[kind]) {
     throw new Error(`save_to must end in ${EXT[kind]} for this tool: ${file}`);
   }
@@ -219,7 +237,7 @@ export function prettyJson(data: unknown): Buffer {
   return Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
-function pngPlan(base: string, dir: boolean, nodeIds: string[]): Array<{ nodeId: string; file: string }> {
+function pngPlan(base: string, dir: boolean, nodeIds: string[], ext: ImageExt = "png"): Array<{ nodeId: string; file: string }> {
   if (!nodeIds.length) throw new Error("No images to save.");
   if (!dir) {
     if (nodeIds.length > 1) {
@@ -229,7 +247,7 @@ function pngPlan(base: string, dir: boolean, nodeIds: string[]): Array<{ nodeId:
   }
   const plan = nodeIds.map((nodeId) => ({
     nodeId,
-    file: path.join(base, `${nodeId.replace(/[^A-Za-z0-9_-]+/g, "-")}.png`),
+    file: path.join(base, `${nodeId.replace(/[^A-Za-z0-9_-]+/g, "-")}.${ext}`),
   }));
   const seen = new Map<string, string>();
   for (const item of plan) {
@@ -250,8 +268,9 @@ function pngPlan(base: string, dir: boolean, nodeIds: string[]): Array<{ nodeId:
 export async function precheckSave(
   saveTo: string,
   kind: SaveKind,
-  opts: Opts & { nodeIds?: string[] } = {},
+  opts: Opts & { nodeIds?: string[]; ext?: ImageExt } = {},
 ): Promise<string[]> {
+  if (kind === "file") throw new Error('Use precheckBytes for kind "file".');
   const base = await resolveSavePath(saveTo, opts);
   let files: string[];
   if (kind === "json") {
@@ -262,9 +281,9 @@ export async function precheckSave(
     files = [base];
   } else {
     const dir = await isDirectoryTarget(saveTo);
-    files = pngPlan(base, dir, opts.nodeIds ?? ["x"]).map((p) => p.file);
+    files = pngPlan(base, dir, opts.nodeIds ?? ["x"], opts.ext).map((p) => p.file);
     for (const f of files) {
-      checkExt(f, "png");
+      checkExt(f, "png", opts.ext);
       await resolveSavePath(f, opts);
     }
   }
@@ -328,15 +347,107 @@ export async function saveJsonWithImages(
 export async function savePngs(
   saveTo: string,
   images: Array<{ nodeId: string; data: Buffer }>,
-  opts: Opts = {},
+  opts: Opts & { ext?: ImageExt } = {},
 ): Promise<SaveResult[]> {
   const files = await precheckSave(saveTo, "png", { ...opts, nodeIds: images.map((i) => i.nodeId) });
+  for (const img of images) assertWithinMax(img.data.length, opts.env);
   const written: SaveResult[] = [];
   for (let i = 0; i < files.length; i++) {
     await atomicWrite(files[i]!, images[i]!.data, opts);
     written.push(describeFile(images[i]!.data, files[i]!, "png"));
   }
   return written;
+}
+
+/** Same as savePngs, for any Figma export format via opts.ext (png, jpg, svg, pdf). */
+export const saveImages = savePngs;
+
+/** Extensions accepted by the generic bytes save path. */
+export const BYTES_EXTENSIONS: readonly string[] = [
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".pdf", ".zip",
+  ".txt", ".csv", ".json", ".md", ".docx", ".xlsx", ".pptx",
+];
+
+const MAX_NAME = 120;
+const RESERVED = /^(con|prn|aux|nul|com[0-9\u00b9\u00b2\u00b3]|lpt[0-9\u00b9\u00b2\u00b3])$/i;
+
+/** DEV_MCP_SAVE_MAX_MB in bytes (default 100). */
+export function maxSaveBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number.parseFloat(env.DEV_MCP_SAVE_MAX_MB ?? "");
+  return (Number.isFinite(n) && n > 0 ? n : 100) * 1024 * 1024;
+}
+
+export function assertWithinMax(bytes: number, env: NodeJS.ProcessEnv = process.env): void {
+  const max = maxSaveBytes(env);
+  if (bytes > max) {
+    throw new Error(`Payload is ${bytes} bytes, above the ${max}-byte limit (DEV_MCP_SAVE_MAX_MB); nothing was saved.`);
+  }
+}
+
+/**
+ * Turns a server-provided file name into one safe path segment: keeps the part after the last
+ * slash or backslash, replaces ':' and other reserved characters with '_', drops leading dots
+ * and trailing dots/spaces, caps the length (keeping the extension). Throws when nothing usable
+ * is left or the name is a Windows device name.
+ */
+export function sanitizeFileName(raw: string): string {
+  if (typeof raw !== "string") throw new Error("File name is missing.");
+  const last = raw.split(/[\\/]/).pop() ?? "";
+  // eslint-disable-next-line no-control-regex
+  let name = last.replace(/[\u0000-\u001f<>:"|?*~]/g, "_").replace(/^[. ]+/, "").replace(/[. ]+$/, "");
+  if (name.length > MAX_NAME) {
+    const ext = path.extname(name);
+    const keep = ext.length > 0 && ext.length < 16 ? ext : "";
+    name = name.slice(0, MAX_NAME - keep.length).replace(/[. ]+$/, "") + keep;
+  }
+  if (!name) throw new Error(`Unusable file name: "${raw}".`);
+  if (RESERVED.test(name.split(".")[0]!.replace(/[. ]+$/, ""))) throw new Error(`Reserved file name: "${raw}".`);
+  return name;
+}
+
+function checkBytesExt(file: string, exts: readonly string[]): void {
+  const ext = path.extname(file).toLowerCase();
+  if (!exts.includes(ext)) {
+    throw new Error(`File extension "${ext || "(none)"}" is not allowed; allowed: ${exts.join(" ")}.`);
+  }
+}
+
+/**
+ * Validates a bytes target before any network call. `saveTo` is a file path (allow-listed
+ * extension) or a directory (existing, or ending in / or \); a directory needs `fileName`
+ * (server provided, sanitised) to resolve the final file. Without fileName only the directory
+ * is validated and returned.
+ */
+export async function precheckBytes(
+  saveTo: string,
+  opts: Opts & { fileName?: string; exts?: readonly string[] } = {},
+): Promise<{ file?: string; dir: string }> {
+  const exts = opts.exts ?? BYTES_EXTENSIONS;
+  const base = await resolveSavePath(saveTo, opts);
+  if (await isDirectoryTarget(saveTo)) {
+    if (opts.fileName === undefined) return { dir: base };
+    const file = path.join(base, sanitizeFileName(opts.fileName));
+    checkBytesExt(file, exts);
+    await resolveSavePath(file, opts);
+    if (!opts.overwrite && (await exists(file))) throw noOverwrite(file);
+    return { dir: base, file };
+  }
+  checkBytesExt(base, exts);
+  if (!opts.overwrite && (await exists(base))) throw noOverwrite(base);
+  return { file: base, dir: path.dirname(base) };
+}
+
+/** Saves arbitrary downloaded bytes with every guard of the JSON/PNG paths plus the size cap. */
+export async function saveBytes(
+  saveTo: string,
+  data: Buffer,
+  opts: Opts & { fileName?: string; exts?: readonly string[] } = {},
+): Promise<SaveResult> {
+  const { file } = await precheckBytes(saveTo, opts);
+  if (!file) throw new Error("save_to is a directory and no file name is available; pass a file path.");
+  assertWithinMax(data.length, opts.env);
+  await atomicWrite(file, data, opts);
+  return describeFile(data, file, "file");
 }
 
 /** DEV_MCP_SPILL_KB in bytes; 0 when unset, invalid, or 0 (spill disabled). */

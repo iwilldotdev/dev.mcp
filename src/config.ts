@@ -1,5 +1,5 @@
 export const PACKAGE_NAME = "dev.mcp";
-export const PACKAGE_VERSION = "1.2.0";
+export const PACKAGE_VERSION = "1.3.0";
 
 export type FigmaConfig = {
   accessToken: string;
@@ -25,6 +25,10 @@ export type AppConfig = {
   gitlab: GitLabConfig;
   httpTimeoutMs: number;
   httpMaxRetries: number;
+  /** Register pre-parity tool names as deprecated aliases (DEV_MCP_LEGACY_TOOL_NAMES, default on). */
+  legacyToolNames: boolean;
+  /** Register the write tools added in 1.3.0 (DEV_MCP_PARITY_WRITES, default off). */
+  parityWrites: boolean;
 };
 
 export const MISSING = {
@@ -43,6 +47,14 @@ function envInt(name: string, fallback: number, source: NodeJS.ProcessEnv): numb
   if (!raw) return fallback;
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function envFlag(name: string, fallback: boolean, source: NodeJS.ProcessEnv): boolean {
+  const raw = source[name]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  if (["0", "false", "no", "off"].includes(raw)) return false;
+  if (["1", "true", "yes", "on"].includes(raw)) return true;
+  return fallback;
 }
 
 export function normalizeAtlassianSite(site: string): string {
@@ -96,6 +108,8 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
     },
     httpTimeoutMs: envInt("HTTP_TIMEOUT_MS", 30_000, source),
     httpMaxRetries: envInt("HTTP_MAX_RETRIES", 3, source),
+    legacyToolNames: envFlag("DEV_MCP_LEGACY_TOOL_NAMES", true, source),
+    parityWrites: envFlag("DEV_MCP_PARITY_WRITES", false, source),
   };
 }
 

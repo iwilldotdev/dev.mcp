@@ -125,6 +125,11 @@ export class FigmaClient {
     return { ...inspectImage(downloaded.data, downloaded.mime), data: downloaded.data };
   }
 
+  /** Render URLs are pre-signed (S3): no Figma token is sent. */
+  async fetchBytes(url: string, maxBytes: number): Promise<{ mime: string; data: Buffer }> {
+    return this.http.download(url, { maxBytes });
+  }
+
   async getImageFills(fileKey: string): Promise<unknown> {
     const url = `${this.config.apiBase}/v1/files/${fileKey}/images`;
     return this.cached(cacheKey(["figma", "image-fills", url]), () =>

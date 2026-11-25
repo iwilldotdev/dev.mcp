@@ -134,6 +134,15 @@ export class JiraClient {
     });
   }
 
+  /** GET /rest/api/3/attachment/content/{id}; follows redirects without forwarding credentials off-site. */
+  downloadAttachment(attachmentId: string, maxBytes: number) {
+    return this.http.download(this.url(`/attachment/content/${encodeURIComponent(attachmentId)}`), {
+      headers: { Authorization: basicAuth(this.config.email, this.config.apiToken), Accept: "*/*" },
+      authOrigin: new URL(this.config.baseUrl).origin,
+      maxBytes,
+    });
+  }
+
   private async collectComments(issueIdOrKey: string): Promise<{ comments: unknown[]; truncated: boolean }> {
     const comments: unknown[] = [];
     let startAt = 0;
@@ -184,5 +193,24 @@ export class JiraClient {
       headers: this.headers(),
       body: JSON.stringify(payload),
     });
+  }
+
+  /**
+   * Generic REST call on /rest/api/3 (default) or /rest/agile/1.0 (`agile: true`).
+   * 204 responses resolve to `{ ok: true }`.
+   */
+  async rest(
+    method: "GET" | "POST" | "PUT" | "DELETE",
+    path: string,
+    opts: { query?: Record<string, string | number | boolean | undefined | null>; body?: unknown; agile?: boolean } = {},
+  ): Promise<unknown> {
+    const base = `${this.config.baseUrl}${opts.agile ? "/rest/agile/1.0" : "/rest/api/3"}${path}`;
+    const url = opts.query ? withQuery(base, opts.query) : base;
+    const res = await this.http.json<unknown>(url, {
+      method,
+      headers: this.headers(),
+      ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
+    });
+    return res === null || res === undefined ? { ok: true } : res;
   }
 }

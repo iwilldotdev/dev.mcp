@@ -1,0 +1,23 @@
+# Changelog
+
+## Unreleased
+
+- **GitLab:** `gitlab_save_merge_request` `draft` now works. The REST API has no draft attribute and silently dropped it, so a "draft" MR was created ready for review; the tool now sets or removes the `Draft:` title marker (on an update with `draft` alone it reads the current title first).
+
+## 1.3.0 — 2026-11-23
+
+Parity with the official MCP servers (GitLab, Atlassian Rovo, Figma): the goal is that dev.mcp can replace them in daily work. See [`docs/official-parity.md`](docs/official-parity.md). The server goes from 60 to 113 tools; 24 pre-parity names stay as deprecated aliases (137 registered with DEV_MCP_PARITY_WRITES=1, 118 by default).
+
+- **Naming:** `<vendor>_<official name in snake_case>` with the official parameters. Renamed tools keep their old name as a deprecated alias with the old schema (`src/tools/register.ts`). `DEV_MCP_LEGACY_TOOL_NAMES=0` hides the aliases.
+- **GitLab:** snake_case parameters like the official server, with legacy camelCase still accepted. `first`/`after` cursor pagination. New tools for users, projects, groups, todos, events, milestones, work items (get, list, save, link), `save_note`, `save_merge_request_review` (official methods: create_note, reply_discussion, create_diff_note, resolve_discussion, update_note, submit_review, approve, unapprove), `apply_suggestion`, branches, tree, commits, tags, releases, wiki pages, artifacts, `save_pipeline`, `save_pipeline_job`, pipeline schedules. `get_merge_request`, `get_pipeline`, `get_job`, `get_commit` and `get_repository_file` gain `include` and slicing. Aliases: `gitlab_whoami`, `gitlab_get_issue`, `gitlab_create_issue`, `gitlab_create_merge_request_note`, `gitlab_get_pipeline_jobs`.
+- **Jira:** Rovo names (`jira_search_issues_using_jql`, `jira_list_issue_transitions`, `jira_add_or_edit_issue_comment`, ...), an optional `cloudId` everywhere, and new reads for comments, changelogs, worklogs, assignable users, current user, statuses, components, versions, boards, sprints, filters and dashboards, plus attachment download and `jira_watch_issue`. `jira_transition_issue` can also move to a sprint or the backlog. 9 aliases.
+- **Confluence:** Rovo v2 model. `confluence_get_content` returns a `snapshotToken`, and `confluence_update_content` refuses a stale one. Unified comments, versions, attachments (with download), tasks and labels. 10 aliases.
+- **Figma (breaking):** `figma_get_screenshot` now returns the image itself, like the official tool. Temporary URLs moved to `figma_get_image_urls`. Also: `nodeId` accepted everywhere, `figma_get_variable_defs` scoped to a node (variables and styles), `figma_download_assets` downloads png/jpg/svg/pdf with `save_to`, comment filters, and the new `figma_get_figjam`.
+- **Binary saves:** `saveBytes` in `src/save.ts` with an extension allow-list, file-name sanitising, `DEV_MCP_SAVE_MAX_MB` (default 100) and all the existing path rules. `HttpClient.download` follows redirects manually and never forwards credentials to another origin.
+- **Write gate (`DEV_MCP_PARITY_WRITES`, default off):** the 19 write tools new in 1.3.0 are registered only when the flag is on, because dev.factory read-only agents block writes by old tool names. Pre-existing write tools (including `jira_transition_issue` with its new `sprintId`/`moveToBacklog`) stay registered. List in `docs/official-parity.md`.
+- **`cloudId`:** a hostname must equal the configured site and a UUID must equal the site's tenant id (`/_edge/tenant_info`, cached). A mismatch is rejected; if the tenant lookup fails, writes are rejected and reads get a warning.
+- **HTTP:** `download` forwards only `Accept` and `User-Agent` to any host other than the auth origin (also on an https to http downgrade). Write requests (POST/PUT/PATCH/DELETE) retry only on 429.
+- **`save_to`:** path segments below the save root may not contain `~` (8.3 short names; a `~` in the root itself is fine), and the dot-segment refusal also applies to the real path of the nearest existing ancestor. Reserved names now include `COM¹ COM² COM³ LPT¹ LPT² LPT³` and names with spaces before the extension (`con .txt`).
+- **GitLab `submit_review`:** every comment is validated before the first POST; if a draft POST or the publish fails, the drafts created by the call are deleted and the error says which.
+- **Confluence:** `confluence_update_comment_resolution` fails when the comment body was not returned instead of erasing it; `confluence_update_content` and the legacy `confluence_update_page` keep the current status (a draft stays a draft) when `status` is not passed.
+- **README:** the GitLab section now says the official GitLab MCP is generally available since 19.5.
